@@ -17,12 +17,12 @@ print("DEBUG - MY_OPENAI_KEY =", api_key)
 
 if api_key is None:
     print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
-    # du kan välja att stoppa här om du vill
+
 client = OpenAI(api_key=api_key)
 
 
-if os.getenv("OPENAI_API_KEY") is None:
-    print("VARNING: OPENAI_API_KEY saknas i miljövariablerna!")
+if os.getenv("MY_OPENAI_KEY") is None:
+    print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
 
 
 
@@ -235,16 +235,29 @@ async def gpt(ctx, *, prompt: str | None = None):
     await ctx.trigger_typing()
 
     try:
-        completion = client.chat.completions.create(
-            model="gpt-3.5-turbo",   # funkar med chat.completions
-            messages=[
-                {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
-                {"role": "user", "content": prompt},
+        # Nytt API-anrop: responses.create
+        resp = client.responses.create(
+            model="gpt-4.1-mini",  # billig, snabb, rekommenderad modell
+            input=[
+                {
+                    "role": "system",
+                    "content": "Du är en hjälpsam, kortfattad assistent i en Discord-server.",
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
             ],
         )
 
-        reply = completion.choices[0].message.content
+        # Debug till Railway-loggar
+        print("DEBUG - raw response:", resp)
 
+        # Plocka ut texten ur svaret
+        reply = resp.output[0].content[0].text
+        print("DEBUG - reply text:", reply)
+
+        # Discord har 2000 tecken-limit
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
@@ -252,6 +265,7 @@ async def gpt(ctx, *, prompt: str | None = None):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
+        # Här ska vi hamna om OpenAI kastar fel (t.ex. fel modell, ingen kredit, osv.)
         print(f"Fel vid OpenAI-anrop: {type(e).__name__}: {e}")
         await ctx.reply(
             f"Något gick fel när jag pratade med ChatGPT\n`{type(e).__name__}: {e}`"
