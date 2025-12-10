@@ -12,8 +12,9 @@ from openai import OpenAI
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
 
-openai_api_key = os.getenv('OPENAI_API_KEY')
-client = OpenAI(api_key=openai_api_key)
+if os.getenv("OPENAI_API_KEY") is None:
+    print("VARNING: OPENAI_API_KEY saknas i miljövariablerna!")
+client = OpenAI
 
 
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
