@@ -426,107 +426,45 @@ async def gg(ctx, *, prompt: str | None = None):
 @bot.command(name="summary1h")
 async def summary1h(ctx):
     """Sammanfattar alla meddelanden i den här kanalen senaste timmen med Gemini."""
-    print(f"!summary1h triggat av {ctx.author}")
-
-    now = datetime.now(TIMEZONE)
-    since = now - timedelta(hours=1)
-
-    await ctx.reply("(debug) Hämtar meddelanden senaste timmen...")
-    await ctx.trigger_typing()
-
-    messages: list[str] = []
-
-    # Hämta historik (äldre först)
-    async for msg in ctx.channel.history(limit=400, after=since, oldest_first=True):
-        # Skippa bot-meddelanden (inkl din egen bot)
-        if msg.author.bot:
-            continue
-
-        content = msg.content.strip()
-        if not content:
-            continue
-
-        # Spara som "namn: text"
-        messages.append(f"{msg.author.display_name}: {content}")
-
-    if not messages:
-        await ctx.reply("Det finns inga meddelanden senaste timmen att sammanfatta.")
-        return
-
-    # Bygg transcript och klipp om det blir extremt långt
-    transcript = "\n".join(messages)
-    max_chars = 8000
-    if len(transcript) > max_chars:
-        transcript = transcript[-max_chars:]
-
-    # Prompten som skickas till samma modell som !gg
-    summary_prompt = (
-        "Du är en AI-assistent som sammanfattar en Discord-kanal.\n"
-        "Här är meddelanden från den senaste timmen (äldre först):\n\n"
-        f"{transcript}\n\n"
-        "Uppgift:\n"
-        "- Skriv en tydlig sammanfattning på svenska (ca 5–10 meningar).\n"
-        "- Ta upp viktiga ämnen, beslut, frågor och skämt.\n"
-        "- Hitta inte på saker som inte nämns i texten.\n"
-    )
-
-    # === Samma setup som i !gg ===
-    GEMINI_KEY = os.getenv("GEMMA_API_KEY")
-    if not GEMINI_KEY:
-        await ctx.reply("GEMMA_API_KEY saknas! Lägg till den i Railway (Google AI Studio-nyckeln).")
-        return
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-2.5-flash:generateContent"
-        f"?key={GEMINI_KEY}"
-    )
-
-    payload = {
-        "contents": [
-            {"parts": [{"text": summary_prompt}]}
-        ]
-    }
-
-    headers = {
-        "Content-Type": "application/json"
-    }
-
-    print("[Gemini-summary] Skickar request...")
+    print(f"[summary1h] triggat av {ctx.author} i kanal {ctx.channel.id}")
 
     try:
-        async with ctx.channel.typing():
-            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        now = datetime.now(TIMEZONE)
+        since = now - timedelta(hours=1)
 
-        print("[Gemini-summary] Statuskod:", resp.status_code)
-        print("[Gemini-summary] Preview:", resp.text[:300])
+        await ctx.reply("(debug) Hämtar meddelanden senaste timmen...")
+        await ctx.trigger_typing()
 
-        if resp.status_code != 200:
-            await ctx.reply(f"Gemini API-fel {resp.status_code}:\n```{resp.text[:300]}```")
+        messages: list[str] = []
+
+        print("[summary1h] startar history-fetch...")
+        async for msg in ctx.channel.history(limit=400, after=since, oldest_first=True):
+            # debug så vi ser att loopen faktiskt körs
+            print(f"[summary1h] hittade meddelande från {msg.author}: {msg.content[:50]!r}")
+
+            # Skippa bots
+            if msg.author.bot:
+                continue
+
+            content = msg.content.strip()
+            if not content:
+                continue
+
+            messages.append(f"{msg.author.display_name}: {content}")
+
+        print(f"[summary1h] antal user-meddelanden: {len(messages)}")
+
+        if not messages:
+            await ctx.send("Det finns inga meddelanden senaste timmen att sammanfatta.")
             return
 
-        data = resp.json()
+        # Bygg transcript
+        transcript = "\n".join(messages)
 
-        try:
-            reply = data["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception as e:
-            print("[Gemini-summary] JSON-fel:", repr(e))
-            await ctx.reply("Kunde inte tolka sammanfattningssvaret från Gemini.")
-            return
-
-        if not reply:
-            reply = "Gemini gav ingen sammanfattning, wtf ¯\\_(ツ)_/¯"
-
-        # Skicka sammanfattningen (splitta vid behov)
-        if len(reply) <= 2000:
-            await ctx.reply(reply)
-        else:
-            for i in range(0, len(reply), 1900):
-                await ctx.send(reply[i:i+1900])
-
-    except Exception as e:
-        print("[Gemini-summary] Oväntat fel:", repr(e))
-        await ctx.reply(f"Något gick snett i !summary1h:\n`{repr(e)}`")
+        # Klipp om det är superlångt
+        max_chars = 8000
+        if le
+::contentReference[oaicite:0]{index=0}
 
 
 # ============================
