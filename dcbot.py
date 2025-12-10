@@ -214,14 +214,18 @@ async def hebbe(ctx):
     await ctx.send(msg)
 
 @bot.command(name="gpt")
-async def gpt(ctx, *, prompt: str):
+async def gpt(ctx, *, prompt: str | None = None):
     """Skickar prompten till ChatGPT och svarar med svaret."""
+    if not prompt:
+        await ctx.reply("Du måste skriva något efter kommandot, t.ex. `!gpt skriv en dikt om 67`")
+        return
+
     await ctx.trigger_typing()  # visar "botten skriver..."
 
     try:
         # Skicka prompten till OpenAI
         completion = client.chat.completions.create(
-            model="gpt-5.1",  # eller annan modell du vill använda:contentReference[oaicite:2]{index=2}
+            model="gpt-4.1-mini",  # stabil liten modell för API
             messages=[
                 {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
                 {"role": "user", "content": prompt},
@@ -234,13 +238,17 @@ async def gpt(ctx, *, prompt: str):
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
-            # Dela upp svaret i flera meddelanden om det är för långt
             for i in range(0, len(reply), 1900):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
-        print(f"Fel vid OpenAI-anrop: {e}")
-        await ctx.reply("Något gick fel när jag pratade med ChatGPT")
+        # Logga felet i Railway-loggen
+        print(f"Fel vid OpenAI-anrop: {type(e).__name__}: {e}")
+        # Visa felet i Discord så vi ser vad som händer
+        await ctx.reply(
+            f"Något gick fel när jag pratade med ChatGPT \n`{type(e).__name__}: {e}`"
+        )
+
 
  
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
