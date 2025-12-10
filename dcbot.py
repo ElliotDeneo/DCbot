@@ -12,8 +12,14 @@ from openai import OpenAI
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
 
+print("DEBUG - OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
+client = OpenAI()
+
+
 if os.getenv("OPENAI_API_KEY") is None:
     print("VARNING: OPENAI_API_KEY saknas i miljövariablerna!")
+
+
 client = OpenAI()
 
 
@@ -222,11 +228,12 @@ async def gpt(ctx, *, prompt: str | None = None):
         await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
+    await ctx.reply("(debug) Jag ska höra med OpenAI...")
     await ctx.trigger_typing()
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",  # liten, billig modell som funkar med /v1/chat/completions
+            model="gpt-4.1-mini",   # funkar med chat.completions
             messages=[
                 {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
                 {"role": "user", "content": prompt},
@@ -242,12 +249,11 @@ async def gpt(ctx, *, prompt: str | None = None):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
-        # 1) logga i Railway
         print(f"Fel vid OpenAI-anrop: {type(e).__name__}: {e}")
-        # 2) visa felet i Discord så vi SER vad som händer
         await ctx.reply(
             f"Något gick fel när jag pratade med ChatGPT\n`{type(e).__name__}: {e}`"
         )
+
 
 
 
