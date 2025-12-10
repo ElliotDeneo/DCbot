@@ -6,14 +6,15 @@ import os
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from openai import OpenAI, OpenAIError # <--- BOMBSÄKER IMPORT!
+from openai import OpenAI, OpenAIError  # <--- BOMBSÄKER IMPORT!
+import requests  # för test_openai_api
 
 
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
 
 api_key = os.getenv("MY_OPENAI_KEY")
-print("DEBUG - MY_OPENAI_KEY =", "SATT" if api_key else "SAKNAS")
+print("DEBUG - MY_OPENAI_KEY =", "SATT if api_key else 'SAKNAS'")
 
 if api_key is None:
     print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
@@ -24,9 +25,40 @@ openai_client = None
 if api_key:
     try:
         # Använder api_key från MY_OPENAI_KEY
-        openai_client = OpenAI(api_key=api_key) 
+        openai_client = OpenAI(api_key=api_key)
     except Exception as e:
         print(f"KRITISKT FEL: Kunde inte initialisera OpenAI-klienten. Fel: {e}")
+
+
+# ====== TESTA OPENAI API VID START ======
+def test_openai_api():
+    """Snabb diagnostik: kolla om API-nyckeln funkar och vad OpenAI svarar."""
+    if not api_key:
+        print("❌ OPENAI TEST: Ingen API-nyckel (MY_OPENAI_KEY) hittades.")
+        return
+
+    url = "https://api.openai.com/v1/chat/completions"
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Säg exakt: API fungerar"}],
+        "max_tokens": 20,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    print("\n===== KÖR OPENAI START-TEST =====")
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        print("OPENAI TEST – statuskod:", resp.status_code)
+        print("OPENAI TEST – rått svar (första 500 tecken):")
+        print(resp.text[:500])
+        print("===== SLUT PÅ OPENAI START-TEST =====\n")
+    except Exception as e:
+        print("❌ OPENAI TEST: Kunde inte kontakta API:t.")
+        print("Fel:", repr(e))
+        print("===== SLUT PÅ OPENAI START-TEST (FEL) =====\n")
 
 
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
@@ -163,141 +195,6 @@ async def hello(ctx):
 async def dansa(ctx):
     await ctx.send('Du-du-du Hey-yeah-yeah-i-yeah \n' 'Vi undrar, är ni redo att vara med? \n' 'Armarna upp, nu ska ni få se \n' 'Kom igen Vem som helst kan vara med (Vara med) \n' 'Så rör på era fötter, o-a-a-a \n' 'Och vicka era höfter, o-la-la-la \n' 'Gör som vi. Till denna melodi \n' 'O-a, o-a-a \n' 'Dansa med oss, klappa era händer \n' 'Gör som vi gör, ta några steg åt vänster \n' 'Lyssna och lär, missa inte chansen \n' 'Nu är vi här med caramelldansen')
 
-@bot.command()
-async def hebbe(ctx):
-    '''Visar exakta onlinetider (start–slut) per dag senaste 7 dagarna.'''
-    now = datetime.now(TIMEZONE)
-    seven_days_ago = now.date() - timedelta(days=6)
-
-    weekday_names = ['Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag']
-
-    per_day: dict[datetime.date, list[tuple[datetime, datetime]]] = {}
-
-    for entry in presence_intervals:
-        start = datetime.fromisoformat(entry['start']).astimezone(TIMEZONE)
-        end = datetime.fromisoformat(entry['end']).astimezone(TIMEZONE)
-
-        if end.date() < seven_days_ago or start.date() > now.date():
-            continue
-
-        if start.date() < seven_days_ago:
-            start = datetime.combine(seven_days_ago, datetime.min.time(), tzinfo=TIMEZONE)
-        if end > now:
-            end = now
-
-        current = start
-        while current < end:
-            day = current.date()
-            next_midnight = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=TIMEZONE)
-            segment_end = min(end, next_midnight)
-
-            per_day.setdefault(day, []).append((current, segment_end))
-            current = segment_end
-
-    def merge_intervals(intervals: list[tuple[datetime, datetime]]):
-        if not intervals:
-            return []
-        intervals = sorted(intervals, key=lambda x: x[0])
-        merged = [intervals[0]]
-        for start, end in intervals[1:]:
-            last_start, last_end = merged[-1]
-            if start <= last_end:
-                merged[-1] = (last_start, max(last_end, end))
-            else:
-                merged.append((start, end))
-        return merged
-
-    lines = []
-
-    for i in range(7):
-        day = seven_days_ago + timedelta(days=i)
-        weekday = weekday_names[day.weekday()]
-
-        intervals = per_day.get(day, [])
-        intervals = merge_intervals(intervals)
-
-        if not intervals:
-            lines.append(f'{weekday}: -')
-        else:
-            parts = [f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in intervals]
-            lines.append(f"{weekday}: " + " & ".join(parts))
-
-    msg = '**Onlinetider (senaste 7 dagarna):**\n```text\n' + '\n'.join(lines) + '\n```'
-    await ctx.send(msg)
-
-
-# ====== BOMBSÄKER GPT-LÖSNING ======
-
-def sync_gpt_call(prompt: str) -> str:
-    """Synkron funktion för att anropa OpenAI API:et."""
-    if openai_client is None:
-        # Detta bör inte hända om initieringen ovan fungerade, men en extra check
-        raise RuntimeError("OpenAI-klienten är inte redo. Kontrollera API-nyckeln i .env.")
-
-    # Använder gpt-4o-mini för snabbhet och kostnadseffektivitet
-    completion = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server som pratar svenska."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=1024,
-    )
-    
-    return completion.choices[0].message.content
-
-
-@bot.command(name="gpt")
-async def gpt(ctx, *, prompt: str | None = None):
-    """Skickar prompten till ChatGPT och svarar med svaret."""
-    print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
-
-    if openai_client is None:
-        await ctx.reply("OpenAI-tjänsten är otillgänglig. Kontrollera att MY_OPENAI_KEY är korrekt satt.")
-        return
-
-    if not prompt:
-        await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
-        return
-
-    await ctx.reply("Jag ska höra med OpenAI...")
-    await ctx.trigger_typing()
-
-    try:
-        # Kör den synkrona OpenAI-anropet i en separat tråd
-        reply = await bot.loop.run_in_executor(None, sync_gpt_call, prompt) 
-        
-        print("DEBUG - OpenAI-svar:", repr(reply))
-
-        if not reply:
-            reply = "Jag fick ett tomt svar från modellen."
-
-        # Skicka svaret, dela upp det om det är för långt
-        if len(reply) <= 2000:
-            await ctx.reply(reply)
-        else:
-            # Använd ctx.send() för att skicka långa svar
-            await ctx.send(f"**Svar till {ctx.author.mention} (del 1):**")
-            for i in range(0, len(reply), 1900):
-                await ctx.send(reply[i:i+1900])
-
-    except OpenAIError as e:
-        # Specifik felhantering för OpenAI-fel (API-nyckel, Rate Limit, etc.)
-        error_type = type(e).__name__
-        print(f"OPENAI FEL ({error_type}): {e}")
-        await ctx.reply(
-            f"OpenAI-fel: Något gick fel vid API-anropet.\n"
-            f"`{error_type}: {e}`\n"
-            f"Kontrollera API-nyckel och saldo."
-        )
-    except Exception as e:
-        # Allmän felhantering (nätverk, trådfel etc.)
-        import traceback
-        traceback.print_exc()
-        await ctx.reply(
-            f"Något oväntat fel inträffade. Prova igen.\n"
-            f"`{type(e).__name__}`"
-        )
 
 
 # ====== KÖR BOTTEN ======
