@@ -229,6 +229,35 @@ def sync_gpt_call(prompt: str) -> str:
         print("[DeepSeek] Oväntat svarformat:", data)
         raise RuntimeError("Oväntat svarformat från DeepSeek.")
 
+@bot.command(name="gpt")
+async def gpt(ctx, *, prompt: str = None):
+    """Skickar prompten till en sån där AI och återkommer."""
+    print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
+
+    if not prompt:
+        await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
+        return
+
+    await ctx.trigger_typing()
+
+    try:
+        # Kör DeepSeek-anropet i en separat tråd så vi inte fryser Discord-loopen
+        reply = await bot.loop.run_in_executor(None, sync_gpt_call, prompt)
+
+        if not reply:
+            reply = "Jag fick ett tomt svar från modellen walla."
+
+        if len(reply) <= 2000:
+            await ctx.reply(reply)
+        else:
+            for i in range(0, len(reply), 1900):
+                await ctx.send(reply[i:i+1900])
+
+    except RuntimeError as e:
+        await ctx.reply(f"Fel vid kontakt med DeepSeek API:\n`{e}`")
+    except Exception as e:
+        await ctx.reply(f"Något oväntat gick fel:\n`{type(e).__name__}: {e}`")
+
 
 # ====== KÖR BOTTEN ======
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
