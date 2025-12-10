@@ -14,7 +14,7 @@ token = os.getenv('DISCORD_TOKEN')
 
 if os.getenv("OPENAI_API_KEY") is None:
     print("VARNING: OPENAI_API_KEY saknas i miljövariablerna!")
-client = OpenAI
+client = OpenAI()
 
 
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
@@ -240,7 +240,7 @@ async def gpt(ctx, *, prompt: str):
 
     except Exception as e:
         print(f"Fel vid OpenAI-anrop: {e}")
-        await ctx.reply("Något gick fel när jag pratade med ChatGPT 😢")
+        await ctx.reply("Något gick fel när jag pratade med ChatGPT")
 
  
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
