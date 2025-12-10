@@ -145,7 +145,7 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
 
 @bot.command()
 async def hello(ctx):
-    await ctx.send(f'Hello {ctx.author.mention}!')
+    await ctx.send(f'Hello {ctx.author.mention}!!')
 
 @bot.command()
 async def dansa(ctx):
