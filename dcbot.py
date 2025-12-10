@@ -6,67 +6,32 @@ import os
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from openai import OpenAI, OpenAIError  # <--- BOMBSÄKER IMPORT!
-import requests  # för test_openai_api
+import requests  # används för DeepSeek-anropet
 
-
+# ============================
+#   LÄS MILJÖVARIABLER
+# ============================
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
 
-api_key = os.getenv("MY_OPENAI_KEY")
-print("DEBUG - MY_OPENAI_KEY =", "SATT if api_key else 'SAKNAS'")
+deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+print("DEBUG - DEEPSEEK_API_KEY =", "SATT" if deepseek_key else "SAKNAS")
 
-if api_key is None:
-    print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
+if not token:
+    print("VARNING: DISCORD_TOKEN saknas i miljövariablerna!")
+if not deepseek_key:
+    print("VARNING: DEEPSEEK_API_KEY saknas i miljövariablerna!")
 
-# ====== INITIALLISERA OPENAI KLIENTEN ======
-# Klienten är synkron, men vi kör den i en executor i en annan tråd.
-openai_client = None
-if api_key:
-    try:
-        # Använder api_key från MY_OPENAI_KEY
-        openai_client = OpenAI(api_key=api_key)
-    except Exception as e:
-        print(f"KRITISKT FEL: Kunde inte initialisera OpenAI-klienten. Fel: {e}")
-
-
-# ====== TESTA OPENAI API VID START ======
-def test_openai_api():
-    """Snabb diagnostik: kolla om API-nyckeln funkar och vad OpenAI svarar."""
-    if not api_key:
-        print("❌ OPENAI TEST: Ingen API-nyckel (MY_OPENAI_KEY) hittades.")
-        return
-
-    url = "https://api.openai.com/v1/chat/completions"
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": "Säg exakt: API fungerar"}],
-        "max_tokens": 20,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    print("\n===== KÖR OPENAI START-TEST =====")
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
-        print("OPENAI TEST – statuskod:", resp.status_code)
-        print("OPENAI TEST – rått svar (första 500 tecken):")
-        print(resp.text[:500])
-        print("===== SLUT PÅ OPENAI START-TEST =====\n")
-    except Exception as e:
-        print("❌ OPENAI TEST: Kunde inte kontakta API:t.")
-        print("Fel:", repr(e))
-        print("===== SLUT PÅ OPENAI START-TEST (FEL) =====\n")
-
-
+# ============================
+#   LOGGNING
+# ============================
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
 OWNER_ID = 117317459819757575
 TIMEZONE = ZoneInfo('Europe/Stockholm')
 
 INTERVAL_FILE = 'presence_intervals.json'
+
 
 def load_intervals():
     try:
@@ -75,11 +40,14 @@ def load_intervals():
     except FileNotFoundError:
         return []
 
+
 def save_intervals(intervals):
     with open(INTERVAL_FILE, 'w', encoding='utf-8') as f:
         json.dump(intervals, f, indent=2)
 
+
 presence_intervals = load_intervals()
+
 
 def add_interval(start_dt: datetime, end_dt: datetime):
     if end_dt <= start_dt:
@@ -98,8 +66,10 @@ def add_interval(start_dt: datetime, end_dt: datetime):
     presence_intervals.append({'start': start_dt.isoformat(), 'end': end_dt.isoformat()})
     save_intervals(presence_intervals)
 
+
 last_status: discord.Status | None = None
 last_change_time: datetime | None = None
+
 
 def is_online_like(status: discord.Status) -> bool:
     return status in (
@@ -109,12 +79,17 @@ def is_online_like(status: discord.Status) -> bool:
         discord.Status.invisible,
     )
 
+
+# ============================
+#   DISCORD INTENTS & BOT
+# ============================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.presences = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+
 
 @bot.event
 async def on_ready():
@@ -152,6 +127,7 @@ async def on_ready():
 
     print(f"Startstatus: {last_status}, last_change_time: {last_change_time}")
 
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -161,6 +137,7 @@ async def on_message(message):
         await message.channel.send('SIX SEVEN!')
 
     await bot.process_commands(message)
+
 
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
@@ -187,6 +164,10 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
 
     last_status = after.status
 
+
+# ============================
+#   KOMMANDON
+# ============================
 @bot.command()
 async def hello(ctx):
     await ctx.send(f'Hello {ctx.author.mention}!!')
@@ -195,13 +176,71 @@ async def hello(ctx):
 async def dansa(ctx):
     await ctx.send('Du-du-du Hey-yeah-yeah-i-yeah \n' 'Vi undrar, är ni redo att vara med? \n' 'Armarna upp, nu ska ni få se \n' 'Kom igen Vem som helst kan vara med (Vara med) \n' 'Så rör på era fötter, o-a-a-a \n' 'Och vicka era höfter, o-la-la-la \n' 'Gör som vi. Till denna melodi \n' 'O-a, o-a-a \n' 'Dansa med oss, klappa era händer \n' 'Gör som vi gör, ta några steg åt vänster \n' 'Lyssna och lär, missa inte chansen \n' 'Nu är vi här med caramelldansen')
 
-# ====== KÖR OPENAI-STARTTEST ======
-test_openai_api()
+
+# ============================
+#   DEEPSEEK GPT-FUNKTION
+# ============================
+def sync_gpt_call(prompt: str) -> str:
+    """Synkron funktion för att anropa DeepSeek API:et."""
+    DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
+    if not DEEPSEEK_KEY:
+        raise RuntimeError("DeepSeek API-nyckel saknas! Lägg till DEEPSEEK_API_KEY i Railway Variables.")
+
+    url = "https://api.deepseek.com/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 1024,
+    }
+
+    resp = requests.post(url, json=payload, headers=headers)
+
+    if resp.status_code != 200:
+        print("DeepSeek API FEL:", resp.status_code, resp.text[:500])
+        raise RuntimeError(f"DeepSeek API error: {resp.status_code}")
+
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
 
 
-# ====== KÖR DISCORD-BOTTEN ======
-bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+@bot.command(name="gpt")
+async def gpt(ctx, *, prompt=None):
+    """Skickar prompten till en sån där AI och återkommer."""
+    print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
 
+    if not prompt:
+        await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
+        return
+
+    await ctx.trigger_typing()
+
+    try:
+        # Kör DeepSeek-anropet i en separat tråd så vi inte fryser Discord-loopen
+        reply = await bot.loop.run_in_executor(None, sync_gpt_call, prompt)
+
+        if not reply:
+            reply = "Jag fick ett tomt svar från modellen walla."
+
+        if len(reply) <= 2000:
+            await ctx.reply(reply)
+        else:
+            # Splitta upp långa svar
+            for i in range(0, len(reply), 1900):
+                await ctx.send(reply[i:i+1900])
+
+    except RuntimeError as e:
+        await ctx.reply(f"Fel vid kontakt med DeepSeek API:\n`{e}`")
+    except Exception as e:
+        await ctx.reply(f"Något oväntat gick fel:\n`{type(e).__name__}: {e}`")
 
 # ====== KÖR BOTTEN ======
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
