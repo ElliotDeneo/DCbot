@@ -87,6 +87,13 @@ intents.presences = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
+# ============================
+#   KORTTIDSMINNE FÖR GPT
+# ============================
+# Nyckel: channel_id (eller user_id om du vill per person)
+# Värde: lista av {"role": "...", "content": "..."}
+conversation_history: dict[int, list[dict]] = {}
+
 @bot.event
 async def on_ready():
     global last_status, last_change_time
@@ -248,32 +255,44 @@ async def gpt(ctx, *, prompt: str | None = None):
         return
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {GROQ_KEY}",
         "Content-Type": "application/json"
     }
 
+    # ===== HÄR KOMMER MINNET IN =====
+    channel_id = ctx.channel.id
+    history = conversation_history.get(channel_id, [])
+
+    # Begränsa historiken så den inte blir gigantisk (t.ex. senaste 8 meddelandena)
+    max_history_messages = 8
+    if len(history) > max_history_messages:
+        history = history[-max_history_messages:]
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Du är en snabb och hjälpsam Discord-bot. "
+                "Svara kort, roligt och ungt. Släng gärna in lite meme / internet slang."
+            ),
+        },
+        # lägg till historiken
+        *history,
+        # nya user-meddelandet
+        {"role": "user", "content": prompt},
+    ]
+
     payload = {
         "model": "llama-3.1-8b-instant",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Du är en snabb och hjälpsam Discord-bot. "
-                    "Svara kort, roligt och ungt. Släng gärna in lite meme / internet slang."
-                )
-            },
-            {"role": "user", "content": prompt}
-        ],
+        "messages": messages,
         "max_tokens": 800,
-        "temperature": 0.7
+        "temperature": 0.7,
     }
 
     print("[Groq] Förbereder request...")
 
     try:
-        # Visa "botten skriver..." medan vi gör API-anropet
         async with ctx.channel.typing():
             print("[Groq] Skickar request...")
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
@@ -282,10 +301,9 @@ async def gpt(ctx, *, prompt: str | None = None):
         print("[Groq] Förhandsvisning av svar:", resp.text[:300])
 
         if resp.status_code != 200:
-            await ctx.reply(f"Groq API-fel {resp.status_code}:\n```{resp.text[:300]}```")
+            await ctx.reply(f"Groq API-fel {resp.statuscode}:\n```{resp.text[:300]}```")
             return
 
-        # Tolka JSON-svaret
         try:
             data = resp.json()
             reply = data["choices"][0]["message"]["content"]
@@ -297,7 +315,18 @@ async def gpt(ctx, *, prompt: str | None = None):
         if not reply:
             reply = "Jag fick ett tomt svar walla"
 
-        # Skicka svaret (hantera långa)
+        # ===== UPPDATERA MINNET =====
+        # Lägg till både user & bot-svar i historiken
+        new_history = history + [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": reply},
+        ]
+        # Trimma igen
+        if len(new_history) > max_history_messages:
+            new_history = new_history[-max_history_messages:]
+        conversation_history[channel_id] = new_history
+
+        # Skicka svaret
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
@@ -307,6 +336,18 @@ async def gpt(ctx, *, prompt: str | None = None):
     except Exception as e:
         print("[Groq] Oväntat fel i gpt-kommandot:", repr(e))
         await ctx.reply(f"Något gick snett i gpt-kommandot:\n`{repr(e)}`")
+
+
+
+@bot.command()
+async def resetgpt(ctx):
+    """Nollställer korttidsminnet i den här kanalen."""
+    channel_id = ctx.channel.id
+    if channel_id in conversation_history:
+        del conversation_history[channel_id]
+        await ctx.reply("Jag har glömt allt vi snackat om i den här kanalen 😵‍💫")
+    else:
+        await ctx.reply("Jag hade inget minne sparat här ändå.")
 
 
 
