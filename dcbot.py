@@ -172,11 +172,11 @@ async def dansa(ctx):
 # ============================
 @bot.command(name="gpt")
 async def gpt(ctx, *, prompt: str | None = None):
-    """Skickar prompten till DeepSeek och svarar i Discord."""
+    """Skickar prompten till en sån där AI och återkommer."""
     print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
 
     if not prompt:
-        await ctx.reply("Du måste skriva något efter kommandot, t.ex. `!gpt skriv en dikt om 67`")
+        await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
     await ctx.trigger_typing()
@@ -194,7 +194,7 @@ async def gpt(ctx, *, prompt: str | None = None):
     payload = {
         "model": "deepseek-chat",
         "messages": [
-            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server."},
+            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server. Svara som en kroniskt online ungdom som älskar memes."},
             {"role": "user", "content": prompt}
         ],
         "max_tokens": 512,
