@@ -6,7 +6,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import requests
+from openai import OpenAI, OpenAIError # <--- BOMBSÄKER IMPORT!
 
 
 load_dotenv()
@@ -18,6 +18,16 @@ print("DEBUG - MY_OPENAI_KEY =", "SATT" if api_key else "SAKNAS")
 if api_key is None:
     print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
 
+# ====== INITIALLISERA OPENAI KLIENTEN ======
+# Klienten är synkron, men vi kör den i en executor i en annan tråd.
+openai_client = None
+if api_key:
+    try:
+        # Använder api_key från MY_OPENAI_KEY
+        openai_client = OpenAI(api_key=api_key) 
+    except Exception as e:
+        print(f"KRITISKT FEL: Kunde inte initialisera OpenAI-klienten. Fel: {e}")
+
 
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
@@ -25,8 +35,6 @@ OWNER_ID = 117317459819757575
 TIMEZONE = ZoneInfo('Europe/Stockholm')
 
 INTERVAL_FILE = 'presence_intervals.json'
-
-# --- Din övriga kod (load_intervals, save_intervals, etc.) är densamma ---
 
 def load_intervals():
     try:
@@ -218,52 +226,35 @@ async def hebbe(ctx):
     await ctx.send(msg)
 
 
-# **NY LOGIK FÖR OPENAI VIA REQUESTS (ASYNKRONT HANTERAD)**
-def sync_ask_gpt(prompt: str) -> str:
-    """Skickar prompten till OpenAI via HTTP (synkront) och returnerar textsvar."""
-    global api_key
-    if api_key is None:
-        raise RuntimeError("Ingen MY_OPENAI_KEY är satt.")
+# ====== BOMBSÄKER GPT-LÖSNING ======
 
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4o-mini", # Giltig, snabb och billig modell
-        "messages": [
-            {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
+def sync_gpt_call(prompt: str) -> str:
+    """Synkron funktion för att anropa OpenAI API:et."""
+    if openai_client is None:
+        # Detta bör inte hända om initieringen ovan fungerade, men en extra check
+        raise RuntimeError("OpenAI-klienten är inte redo. Kontrollera API-nyckeln i .env.")
+
+    # Använder gpt-4o-mini för snabbhet och kostnadseffektivitet
+    completion = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server som pratar svenska."},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 1024,
-        "temperature": 0.7
-    }
-
-    print("DEBUG - skickar HTTP-request till OpenAI...")
-    # Använder requests (synkront)
-    resp = requests.post(url, headers=headers, json=payload, timeout=30) 
-
-    print("DEBUG - HTTP-status:", resp.status_code)
+        max_tokens=1024,
+    )
     
-    if resp.status_code != 200:
-        print("DEBUG - HTTP-body:", resp.text)
-        # Inkludera en tydligare felhantering för icke-200 svar
-        raise RuntimeError(f"OpenAI svarade med status {resp.status_code}. Kontrollera API-nyckeln och användning i loggfilen.")
-
-    try:
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
-        return reply
-    except (json.JSONDecodeError, KeyError) as e:
-        print("DEBUG - JSON/KeyError vid parsing av svar:", resp.text)
-        raise RuntimeError(f"Kunde inte tolka svaret från OpenAI: {e}")
+    return completion.choices[0].message.content
 
 
 @bot.command(name="gpt")
 async def gpt(ctx, *, prompt: str | None = None):
     """Skickar prompten till ChatGPT och svarar med svaret."""
     print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
+
+    if openai_client is None:
+        await ctx.reply("OpenAI-tjänsten är otillgänglig. Kontrollera att MY_OPENAI_KEY är korrekt satt.")
+        return
 
     if not prompt:
         await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
@@ -273,30 +264,41 @@ async def gpt(ctx, *, prompt: str | None = None):
     await ctx.trigger_typing()
 
     try:
-        # Kör den synkrona funktionen i en separat tråd för att undvika blockering
-        reply = await bot.loop.run_in_executor(None, sync_ask_gpt, prompt)
+        # Kör den synkrona OpenAI-anropet i en separat tråd
+        reply = await bot.loop.run_in_executor(None, sync_gpt_call, prompt) 
         
         print("DEBUG - OpenAI-svar:", repr(reply))
 
         if not reply:
-            reply = "Jag fick ett tomt svar från modellen walla"
+            reply = "Jag fick ett tomt svar från modellen."
 
         # Skicka svaret, dela upp det om det är för långt
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
+            # Använd ctx.send() för att skicka långa svar
             await ctx.send(f"**Svar till {ctx.author.mention} (del 1):**")
             for i in range(0, len(reply), 1900):
                 await ctx.send(reply[i:i+1900])
 
+    except OpenAIError as e:
+        # Specifik felhantering för OpenAI-fel (API-nyckel, Rate Limit, etc.)
+        error_type = type(e).__name__
+        print(f"OPENAI FEL ({error_type}): {e}")
+        await ctx.reply(
+            f"OpenAI-fel: Något gick fel vid API-anropet.\n"
+            f"`{error_type}: {e}`\n"
+            f"Kontrollera API-nyckel och saldo."
+        )
     except Exception as e:
+        # Allmän felhantering (nätverk, trådfel etc.)
         import traceback
         traceback.print_exc()
         await ctx.reply(
-            "Något gick fel när jag pratade med ChatGPT, rackarns\n"
-            f"`{type(e).__name__}: {e}`\n"
-            "Kontrollera loggfilen (dcbot.log) för detaljer, särskilt HTTP-statuskod."
+            f"Något oväntat fel inträffade. Prova igen.\n"
+            f"`{type(e).__name__}`"
         )
 
 
+# ====== KÖR BOTTEN ======
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
