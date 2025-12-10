@@ -433,7 +433,9 @@ async def summary1h(ctx):
         since = now - timedelta(hours=1)
 
         await ctx.reply("(debug) Hämtar meddelanden senaste timmen...")
-        await ctx.trigger_typing()
+
+        messages: list[str] = []
+
 
         messages: list[str] = []
 
