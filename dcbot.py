@@ -463,8 +463,74 @@ async def summary1h(ctx):
 
         # Klipp om det är superlångt
         max_chars = 8000
-        if le
-::contentReference[oaicite:0]{index=0}
+        if len(transcript) > max_chars:
+            transcript = transcript[-max_chars:]
+            print("[summary1h] transcript nerklippt till", max_chars, "tecken")
+
+        # Prompt till Gemini – samma modell som !gg
+        summary_prompt = (
+            "Du är en AI-assistent som sammanfattar en Discord-kanal.\n"
+            "Här är meddelanden från den senaste timmen (äldre först):\n\n"
+            f"{transcript}\n\n"
+            "Uppgift:\n"
+            "- Skriv en tydlig sammanfattning på svenska (ca 5–10 meningar).\n"
+            "- Ta upp viktiga ämnen, beslut, frågor och skämt.\n"
+            "- Hitta inte på saker som inte nämns i texten.\n"
+        )
+
+        GEMINI_KEY = os.getenv("GEMMA_API_KEY")
+        if not GEMINI_KEY:
+            await ctx.send("GEMMA_API_KEY saknas! Lägg till den i Railway (Google AI Studio-nyckeln).")
+            return
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            "models/gemini-2.5-flash:generateContent"
+            f"?key={GEMINI_KEY}"
+        )
+
+        payload = {
+            "contents": [
+                {"parts": [{"text": summary_prompt}]}
+            ]
+        }
+
+        headers = {"Content-Type": "application/json"}
+
+        print("[Gemini-summary] Skickar request...")
+        async with ctx.channel.typing():
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+
+        print("[Gemini-summary] Statuskod:", resp.status_code)
+        print("[Gemini-summary] Preview:", resp.text[:300])
+
+        if resp.status_code != 200:
+            await ctx.send(f"Gemini API-fel {resp.status_code}:\n```{resp.text[:300]}```")
+            return
+
+        try:
+            data = resp.json()
+            reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            print("[Gemini-summary] JSON-fel:", repr(e), "BODY:", resp.text[:500])
+            await ctx.send("Kunde inte tolka sammanfattningssvaret från Gemini.")
+            return
+
+        if not reply:
+            reply = "Gemini gav ingen sammanfattning, wtf ¯\\_(ツ)_/¯"
+
+        # Skicka sammanfattningen (splitta om för lång)
+        if len(reply) <= 2000:
+            await ctx.send(reply)
+        else:
+            for i in range(0, len(reply), 1900):
+                await ctx.send(reply[i:i+1900])
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await ctx.send(f"summary1h kraschade:\n`{type(e).__name__}: {e}`")
+
 
 
 # ============================
