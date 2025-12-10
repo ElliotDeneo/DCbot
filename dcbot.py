@@ -13,7 +13,7 @@ import requests
 # ============================
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_KEY = os.getenv("GEMMA_API_KEY")
 groq_key = os.getenv("GROQ_API_KEY")
 
 print("DEBUG - GROQ_API_KEY =", "SATT" if groq_key else "SAKNAS")
@@ -231,7 +231,7 @@ async def hebbe(ctx):
         if not intervals:
             lines.append(f'{weekday}: -')
         else:
-            parts = [f"{start.strftime("%H:%M")}-{end.strftime("%H:%M")}" for start, end in intervals]
+            parts = [f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in intervals]
             lines.append(f"{weekday}: " + " & ".join(parts))
 
     msg = '**Onlinetider (senaste 7 dagarna):**\n```text\n' + '\n'.join(lines) + '\n```'
