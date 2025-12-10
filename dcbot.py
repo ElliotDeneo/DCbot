@@ -352,6 +352,73 @@ async def resetgpt(ctx):
 
 
 # ============================
+#   GEMMA / GOOGLE AI KOMMANDO
+# ============================
+@bot.command(name="gg")
+async def gg(ctx, *, prompt: str | None = None):
+    """Fråga Google Gemma-modellen."""
+    print(f"!gg triggat av {ctx.author} med prompt: {prompt!r}")
+
+    if not prompt:
+        await ctx.reply("Skriv något efter kommandot, t.ex. `!gg vad är 67 + 67?`")
+        return
+
+    GEMMA_KEY = os.getenv("GEMMA_API_KEY")
+    if not GEMMA_KEY:
+        await ctx.reply("GEMMA_API_KEY saknas! Lägg till den i Railway.")
+        return
+
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemma-2b-it:generateContent?key=" + GEMMA_KEY
+
+    payload = {
+        "contents": [
+            {"parts": [{"text": prompt}]}
+        ]
+    }
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    print("[Gemma] Skickar request...")
+
+    try:
+        async with ctx.channel.typing():
+            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+
+        print("[Gemma] Statuskod:", resp.status_code)
+        print("[Gemma] Preview:", resp.text[:300])
+
+        if resp.status_code != 200:
+            await ctx.reply(f"Gemma API-fel {resp.status_code}:\n```{resp.text[:300]}```")
+            return
+
+        data = resp.json()
+
+        # Nyaste API-formatet: "candidates" -> "content" -> "parts"[0]["text"]
+        try:
+            reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            print("[Gemma] JSON-fel:", repr(e))
+            await ctx.reply("Kunde inte tolka svaret från Gemma.")
+            return
+
+        if not reply:
+            reply = "Gemma gav inget svar?"
+
+        # Hantera långa svar
+        if len(reply) <= 2000:
+            await ctx.reply(reply)
+        else:
+            for i in range(0, len(reply), 1900):
+                await ctx.send(reply[i:i+1900])
+
+    except Exception as e:
+        print("[Gemma] Oväntat fel:", repr(e))
+        await ctx.reply(f"Något gick snett i Gemma-kommandot:\n`{repr(e)}`")
+
+
+# ============================
 #   STARTA BOTTEN
 # ============================
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
