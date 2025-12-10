@@ -216,15 +216,17 @@ async def hebbe(ctx):
 @bot.command(name="gpt")
 async def gpt(ctx, *, prompt: str | None = None):
     """Skickar prompten till ChatGPT och svarar med svaret."""
+    print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
+
     if not prompt:
-        await ctx.reply("Du måste skriva något efter kommandot, t.ex. `!gpt skriv en dikt om 67`")
+        await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
-    await ctx.trigger_typing()  # visar "botten skriver..."
+    await ctx.trigger_typing()
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",  # liten, snabb modell som funkar i chat.completions
+            model="gpt-4.1-mini",  # liten, billig modell som funkar med /v1/chat/completions
             messages=[
                 {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
                 {"role": "user", "content": prompt},
@@ -240,12 +242,13 @@ async def gpt(ctx, *, prompt: str | None = None):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
-        # Logga till Railway
+        # 1) logga i Railway
         print(f"Fel vid OpenAI-anrop: {type(e).__name__}: {e}")
-        # Visa felet i Discord så vi ser exakt vad som är fel
+        # 2) visa felet i Discord så vi SER vad som händer
         await ctx.reply(
-            f"Något gick fel när jag pratade med ChatGPT 😢\n`{type(e).__name__}: {e}`"
+            f"Något gick fel när jag pratade med ChatGPT\n`{type(e).__name__}: {e}`"
         )
+
 
 
  
