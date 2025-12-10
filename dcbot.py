@@ -42,58 +42,64 @@ async def gpt(ctx, *, prompt: str | None = None):
         await ctx.reply("Du måste skriva något efter kommandot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
-    if not DEEPSEEK_API_KEY:
+    DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
+    if not DEEPSEEK_KEY:
         await ctx.reply("DEEPSEEK_API_KEY saknas i env/Variables.")
         return
 
-    await ctx.trigger_typing()
-
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": "Du är en hjälpsam svensk Discord-bot."},
-            {"role": "user", "content": prompt},
-        ],
-        "max_tokens": 256,
-        "stream": False,
-    }
-
-    print("[DeepSeek] Skickar request...")
     try:
+        print("[GPT] Går in i huvud-try-blocket")
+        # 1) Testa att ens skicka typing-indikatorn
+        print("[GPT] Försöker ctx.trigger_typing() ...")
+        await ctx.trigger_typing()
+        print("[GPT] Klar med ctx.trigger_typing()")
+
+        # 2) Förbered request
+        url = "https://api.deepseek.com/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": "Du är en hjälpsam svensk Discord-bot."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 256,
+            "stream": False,
+        }
+
+        print("[DeepSeek] Skickar request...")
         resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        print("[DeepSeek] Statuskod:", resp.status_code)
+        print("[DeepSeek] Rått svar (början):", resp.text[:300])
+
+        if resp.status_code != 200:
+            await ctx.reply(f"DeepSeek API-fel {resp.status_code}:\n```text\n{resp.text[:300]}\n```")
+            return
+
+        try:
+            data = resp.json()
+            reply = data["choices"][0]["message"]["content"]
+        except Exception as e:
+            print("[DeepSeek] JSON/format-fel:", repr(e))
+            await ctx.reply("Kunde inte tolka svaret från DeepSeek.")
+            return
+
+        if not reply:
+            reply = "Jag fick ett tomt svar från modellen."
+
+        if len(reply) <= 2000:
+            await ctx.reply(reply)
+        else:
+            for i in range(0, len(reply), 1900):
+                await ctx.send(reply[i:i+1900])
+
     except Exception as e:
-        print("[DeepSeek] Nätverksfel:", repr(e))
-        await ctx.reply(f"Nätverksfel mot DeepSeek:\n`{e}`")
-        return
-
-    print("[DeepSeek] Statuskod:", resp.status_code)
-    print("[DeepSeek] Rått svar (början):", resp.text[:300])
-
-    if resp.status_code != 200:
-        await ctx.reply(f"DeepSeek API-fel {resp.status_code}:\n```text\n{resp.text[:300]}\n```")
-        return
-
-    try:
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
-    except Exception as e:
-        print("[DeepSeek] JSON/format-fel:", repr(e))
-        await ctx.reply("Kunde inte tolka svaret från DeepSeek.")
-        return
-
-    if not reply:
-        reply = "Jag fick ett tomt svar från modellen."
-
-    if len(reply) <= 2000:
-        await ctx.reply(reply)
-    else:
-        for i in range(0, len(reply), 1900):
-            await ctx.send(reply[i:i+1900])
+        # ALLA fel här inne hamnar nu både i loggen OCH i Discord
+        print("[GPT] Fångade undantag i gpt-kommandot:", repr(e))
+        await ctx.reply(f"Internt fel i gpt-kommandot:\n`{repr(e)}`")
 
 
 # ========= STARTA BOTTEN =========
