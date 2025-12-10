@@ -163,6 +163,73 @@ async def hello(ctx):
 async def dansa(ctx):
     await ctx.send('Du-du-du Hey-yeah-yeah-i-yeah \n' 'Vi undrar, är ni redo att vara med? \n' 'Armarna upp, nu ska ni få se \n' 'Kom igen Vem som helst kan vara med (Vara med) \n' 'Så rör på era fötter, o-a-a-a \n' 'Och vicka era höfter, o-la-la-la \n' 'Gör som vi. Till denna melodi \n' 'O-a, o-a-a \n' 'Dansa med oss, klappa era händer \n' 'Gör som vi gör, ta några steg åt vänster \n' 'Lyssna och lär, missa inte chansen \n' 'Nu är vi här med caramelldansen')
 
+@bot.command()
+async def hebbe(ctx):
+    """Visar exakta onlinetider (start–slut) per dag senaste 7 dagarna."""
+    now = datetime.now(TIMEZONE)
+    seven_days_ago = now.date() - timedelta(days=6)
+
+    weekday_names = ['Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag']
+
+    # dag -> lista av (start, slut)
+    per_day: dict[datetime.date, list[tuple[datetime, datetime]]] = {}
+
+    for entry in presence_intervals:
+        start = datetime.fromisoformat(entry['start']).astimezone(TIMEZONE)
+        end = datetime.fromisoformat(entry['end']).astimezone(TIMEZONE)
+
+        # hoppa över intervall helt utanför 7-dagarsfönstret
+        if end.date() < seven_days_ago or start.date() > now.date():
+            continue
+
+        # klipp intervallen till [seven_days_ago, now]
+        if start.date() < seven_days_ago:
+            start = datetime.combine(seven_days_ago, datetime.min.time(), tzinfo=TIMEZONE)
+        if end > now:
+            end = now
+
+        # dela upp över midnatt
+        current = start
+        while current < end:
+            day = current.date()
+            next_midnight = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=TIMEZONE)
+            segment_end = min(end, next_midnight)
+
+            per_day.setdefault(day, []).append((current, segment_end))
+            current = segment_end
+
+    def merge_intervals(intervals: list[tuple[datetime, datetime]]):
+        if not intervals:
+            return []
+        intervals = sorted(intervals, key=lambda x: x[0])
+        merged = [intervals[0]]
+        for start, end in intervals[1:]:
+            last_start, last_end = merged[-1]
+            if start <= last_end:
+                merged[-1] = (last_start, max(last_end, end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    lines = []
+
+    for i in range(7):
+        day = seven_days_ago + timedelta(days=i)
+        weekday = weekday_names[day.weekday()]
+
+        intervals = per_day.get(day, [])
+        intervals = merge_intervals(intervals)
+
+        if not intervals:
+            lines.append(f'{weekday}: -')
+        else:
+            parts = [f"{start.strftime("%H:%M")}-{end.strftime("%H:%M")}" for start, end in intervals]
+            lines.append(f"{weekday}: " + " & ".join(parts))
+
+    msg = '**Onlinetider (senaste 7 dagarna):**\n```text\n' + '\n'.join(lines) + '\n```'
+    await ctx.send(msg)
+
+
 # ============================
 #   GPT / GROQ-KOMMANDO
 # ============================
