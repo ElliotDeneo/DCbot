@@ -235,29 +235,23 @@ async def gpt(ctx, *, prompt: str | None = None):
     await ctx.trigger_typing()
 
     try:
-        # Nytt API-anrop: responses.create
-        resp = client.responses.create(
-            model="gpt-4.1-mini",  # billig, snabb, rekommenderad modell
-            input=[
-                {
-                    "role": "system",
-                    "content": "Du är en hjälpsam, kortfattad assistent i en Discord-server.",
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
+        # Säkert, modernt anrop – gpt-4o-mini + chat.completions
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
+                {"role": "user", "content": prompt},
             ],
+            max_tokens=512,
         )
 
-        # Debug till Railway-loggar
-        print("DEBUG - raw response:", resp)
+        reply = completion.choices[0].message.content
+        print("DEBUG - OpenAI-svar:", repr(reply))
 
-        # Plocka ut texten ur svaret
-        reply = resp.output[0].content[0].text
-        print("DEBUG - reply text:", reply)
+        if not reply:
+            reply = "Jag fick ett tomt svar från modellen, sori"
 
-        # Discord har 2000 tecken-limit
+        # Discord har 2000-teckensgräns
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
@@ -265,11 +259,15 @@ async def gpt(ctx, *, prompt: str | None = None):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
-        # Här ska vi hamna om OpenAI kastar fel (t.ex. fel modell, ingen kredit, osv.)
-        print(f"Fel vid OpenAI-anrop: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()  # full stack trace till Railway-loggar
+
+        # Skicka tillbaka själva felet till Discord så vi ser vad som händer
         await ctx.reply(
-            f"Något gick fel när jag pratade med ChatGPT\n`{type(e).__name__}: {e}`"
+            "Något gick fel när jag pratade med ChatGPT... six seven\n"
+            f"`{type(e).__name__}: {e}`"
         )
+
 
 
 
