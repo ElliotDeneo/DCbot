@@ -180,58 +180,9 @@ async def dansa(ctx):
 # ============================
 #   DEEPSEEK GPT-FUNKTION
 # ============================
-def sync_gpt_call(prompt: str) -> str:
-    """Synkron funktion för att anropa DeepSeek API:et."""
-    DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
-    if not DEEPSEEK_KEY:
-        raise RuntimeError("DeepSeek API-nyckel saknas! Lägg till DEEPSEEK_API_KEY i Railway Variables.")
-
-    url = "https://api.deepseek.com/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server."},
-            {"role": "user", "content": prompt},
-        ],
-        "max_tokens": 1024,
-        "stream": False,
-    }
-
-    print("[DeepSeek] Skickar request ...")
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
-    except Exception as e:
-        print("[DeepSeek] Nätverksfel:", repr(e))
-        raise RuntimeError(f"Nätverksfel mot DeepSeek: {e}")
-
-    print("[DeepSeek] Fick svar, statuskod:", resp.status_code)
-    print("[DeepSeek] Rått svar (första 500 tecken):", resp.text[:500])
-
-    if resp.status_code != 200:
-        raise RuntimeError(f"DeepSeek API error {resp.status_code}: {resp.text[:200]}")
-
-    try:
-        data = resp.json()
-    except Exception as e:
-        print("[DeepSeek] JSON-dekodningsfel:", repr(e))
-        raise RuntimeError("Kunde inte tolka svaret från DeepSeek (inte giltig JSON).")
-
-    # Skydda oss om choices saknas
-    try:
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError) as e:
-        print("[DeepSeek] Oväntat svarformat:", data)
-        raise RuntimeError("Oväntat svarformat från DeepSeek.")
-
 @bot.command(name="gpt")
-async def gpt(ctx, *, prompt: str = None):
-    """Skickar prompten till en sån där AI och återkommer."""
+async def gpt(ctx, *, prompt: str | None = None):
+    """Skickar prompten till DeepSeek och svarar med svaret."""
     print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
 
     if not prompt:
@@ -240,23 +191,58 @@ async def gpt(ctx, *, prompt: str = None):
 
     await ctx.trigger_typing()
 
+    DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
+    if not DEEPSEEK_KEY:
+        await ctx.reply("DeepSeek-nyckel saknas (DEEPSEEK_API_KEY). Kolla Railway Variables.")
+        return
+
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server. Svara som om du är en kroniskt online meme-besatt ungdom."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 512,
+        "stream": False,
+    }
+
+    print("[DeepSeek] Skickar request ...")
     try:
-        # Kör DeepSeek-anropet i en separat tråd så vi inte fryser Discord-loopen
-        reply = await bot.loop.run_in_executor(None, sync_gpt_call, prompt)
-
-        if not reply:
-            reply = "Jag fick ett tomt svar från modellen walla."
-
-        if len(reply) <= 2000:
-            await ctx.reply(reply)
-        else:
-            for i in range(0, len(reply), 1900):
-                await ctx.send(reply[i:i+1900])
-
-    except RuntimeError as e:
-        await ctx.reply(f"Fel vid kontakt med DeepSeek API:\n`{e}`")
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
     except Exception as e:
-        await ctx.reply(f"Något oväntat gick fel:\n`{type(e).__name__}: {e}`")
+        print("[DeepSeek] Nätverksfel:", repr(e))
+        await ctx.reply(f"Nätverksfel mot DeepSeek:\n`{e}`")
+        return
+
+    print("[DeepSeek] Fick svar, statuskod:", resp.status_code)
+    print("[DeepSeek] Rått svar (första 400 tecken):", resp.text[:400])
+
+    if resp.status_code != 200:
+        await ctx.reply(f"DeepSeek API error {resp.status_code}:\n```text\n{resp.text[:300]}\n```")
+        return
+
+    try:
+        data = resp.json()
+        reply = data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("[DeepSeek] JSON-/formatfel:", repr(e))
+        await ctx.reply("Kunde inte tolka svaret från DeepSeek.")
+        return
+
+    if not reply:
+        reply = "Jag fick ett tomt svar från modellen."
+
+    if len(reply) <= 2000:
+        await ctx.reply(reply)
+    else:
+        for i in range(0, len(reply), 1900):
+            await ctx.send(reply[i:i+1900])
+
 
 
 # ====== KÖR BOTTEN ======
