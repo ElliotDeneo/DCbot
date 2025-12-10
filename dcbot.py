@@ -218,37 +218,9 @@ async def hebbe(ctx):
 
 
 def ask_gpt(prompt: str) -> str:
-    """Skickar prompten till OpenAI via HTTP och returnerar textsvar."""
-    if api_key is None:
-        raise RuntimeError("Ingen MY_OPENAI_KEY är satt")
-
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4o-mini",  # funkar med nya API:t
-        "messages": [
-            {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
-            {"role": "user", "content": prompt},
-        ],
-        "max_tokens": 512,
-    }
-
-    print("DEBUG - skickar HTTP-request till OpenAI...")
-
-    resp = requests.post(url, headers=headers, json=payload, timeout=20)
-
-    print("DEBUG - HTTP-status:", resp.status_code)
-    if resp.status_code != 200:
-        # logga hela svaret för debugging
-        print("DEBUG - HTTP-body:", resp.text)
-        raise RuntimeError(f"OpenAI svarade med status {resp.status_code}: {resp.text[:200]}")
-
-    data = resp.json()
-    reply = data["choices"][0]["message"]["content"]
-    return reply
+    # Tillfällig testfunktion utan OpenAI
+    print("DEBUG - ask_gpt kallades med prompt:", repr(prompt))
+    return f"TESTSVAR (lokalt): {prompt}"
 
 
 @bot.command(name="gpt")
