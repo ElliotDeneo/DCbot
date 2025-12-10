@@ -13,6 +13,7 @@ import requests
 # ============================
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 groq_key = os.getenv("GROQ_API_KEY")
 
 print("DEBUG - GROQ_API_KEY =", "SATT" if groq_key else "SAKNAS")
@@ -356,19 +357,24 @@ async def resetgpt(ctx):
 # ============================
 @bot.command(name="gg")
 async def gg(ctx, *, prompt: str | None = None):
-    """Fråga Google Gemma-modellen."""
+    """Fråga Google Gemini (flash-modellen)."""
     print(f"!gg triggat av {ctx.author} med prompt: {prompt!r}")
 
     if not prompt:
         await ctx.reply("Skriv något efter kommandot, t.ex. `!gg vad är 67 + 67?`")
         return
 
-    GEMMA_KEY = os.getenv("GEMMA_API_KEY")
-    if not GEMMA_KEY:
-        await ctx.reply("GEMMA_API_KEY saknas! Lägg till den i Railway.")
+    GEMINI_KEY = os.getenv("GEMMA_API_KEY")  # eller byt till GEMINI_API_KEY om du vill
+    if not GEMINI_KEY:
+        await ctx.reply("GEMMA_API_KEY saknas! Lägg till den i Railway (Google AI Studio-nyckeln).")
         return
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemma-2b-it:generateContent?key=" + GEMMA_KEY
+    # OBS: nu kör vi Gemini 2.5 Flash – detta är ett giltigt model-ID för v1beta
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        "models/gemini-2.5-flash:generateContent"
+        f"?key={GEMINI_KEY}"
+    )
 
     payload = {
         "contents": [
@@ -380,33 +386,32 @@ async def gg(ctx, *, prompt: str | None = None):
         "Content-Type": "application/json"
     }
 
-    print("[Gemma] Skickar request...")
+    print("[Gemini] Skickar request...")
 
     try:
         async with ctx.channel.typing():
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
 
-        print("[Gemma] Statuskod:", resp.status_code)
-        print("[Gemma] Preview:", resp.text[:300])
+        print("[Gemini] Statuskod:", resp.status_code)
+        print("[Gemini] Preview:", resp.text[:300])
 
         if resp.status_code != 200:
-            await ctx.reply(f"Gemma API-fel {resp.status_code}:\n```{resp.text[:300]}```")
+            await ctx.reply(f"Gemini API-fel {resp.status_code}:\n```{resp.text[:300]}```")
             return
 
         data = resp.json()
 
-        # Nyaste API-formatet: "candidates" -> "content" -> "parts"[0]["text"]
+        # "candidates" -> "content" -> "parts"[0]["text"]
         try:
             reply = data["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
-            print("[Gemma] JSON-fel:", repr(e))
-            await ctx.reply("Kunde inte tolka svaret från Gemma.")
+            print("[Gemini] JSON-fel:", repr(e))
+            await ctx.reply("Kunde inte tolka svaret från Gemini.")
             return
 
         if not reply:
-            reply = "Gemma gav inget svar?"
+            reply = "Gemini gav inget svar, wtf ¯\\_(ツ)_/¯"
 
-        # Hantera långa svar
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
@@ -414,8 +419,9 @@ async def gg(ctx, *, prompt: str | None = None):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
-        print("[Gemma] Oväntat fel:", repr(e))
-        await ctx.reply(f"Något gick snett i Gemma-kommandot:\n`{repr(e)}`")
+        print("[Gemini] Oväntat fel:", repr(e))
+        await ctx.reply(f"Något gick snett i !gg-kommandot:\n`{repr(e)}`")
+
 
 
 # ============================
