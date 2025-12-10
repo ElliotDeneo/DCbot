@@ -33,4 +33,6 @@ yarl==1.22.0
 discord.py
 python-dotenv
 openai>=1.35.14
-
+discord.py
+python-dotenv
+requests
