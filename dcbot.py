@@ -195,6 +195,12 @@ async def hello(ctx):
 async def dansa(ctx):
     await ctx.send('Du-du-du Hey-yeah-yeah-i-yeah \n' 'Vi undrar, är ni redo att vara med? \n' 'Armarna upp, nu ska ni få se \n' 'Kom igen Vem som helst kan vara med (Vara med) \n' 'Så rör på era fötter, o-a-a-a \n' 'Och vicka era höfter, o-la-la-la \n' 'Gör som vi. Till denna melodi \n' 'O-a, o-a-a \n' 'Dansa med oss, klappa era händer \n' 'Gör som vi gör, ta några steg åt vänster \n' 'Lyssna och lär, missa inte chansen \n' 'Nu är vi här med caramelldansen')
 
+# ====== KÖR OPENAI-STARTTEST ======
+test_openai_api()
+
+
+# ====== KÖR DISCORD-BOTTEN ======
+bot.run(token, log_handler=handler, log_level=logging.DEBUG)
 
 
 # ====== KÖR BOTTEN ======
