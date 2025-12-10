@@ -175,8 +175,6 @@ async def gpt(ctx, *, prompt: str | None = None):
         await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
-    await ctx.trigger_typing()
-
     GROQ_KEY = os.getenv("GROQ_API_KEY")
     if not GROQ_KEY:
         await ctx.reply("GROQ_API_KEY saknas! Lägg till den i Railway.")
@@ -192,47 +190,57 @@ async def gpt(ctx, *, prompt: str | None = None):
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [
-            {"role": "system", "content": "Du är en snabb och hjälpsam Discord-bot. Svara kort, roligt och ungt. Släng gärna in lite meme / internet slang"},
+            {
+                "role": "system",
+                "content": (
+                    "Du är en snabb och hjälpsam Discord-bot. "
+                    "Svara kort, roligt och ungt. Släng gärna in lite meme / internet slang."
+                )
+            },
             {"role": "user", "content": prompt}
         ],
         "max_tokens": 800,
         "temperature": 0.7
     }
 
-    print("[Groq] Skickar request...")
+    print("[Groq] Förbereder request...")
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        # Visa "botten skriver..." medan vi gör API-anropet
+        async with ctx.channel.typing():
+            print("[Groq] Skickar request...")
+            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+
+        print("[Groq] Statuskod:", resp.status_code)
+        print("[Groq] Förhandsvisning av svar:", resp.text[:300])
+
+        if resp.status_code != 200:
+            await ctx.reply(f"Groq API-fel {resp.status_code}:\n```{resp.text[:300]}```")
+            return
+
+        # Tolka JSON-svaret
+        try:
+            data = resp.json()
+            reply = data["choices"][0]["message"]["content"]
+        except Exception as e:
+            print("[Groq] JSON-fel:", repr(e))
+            await ctx.reply("Kunde inte tolka svaret från Groq.")
+            return
+
+        if not reply:
+            reply = "Jag fick ett tomt svar walla"
+
+        # Skicka svaret (hantera långa)
+        if len(reply) <= 2000:
+            await ctx.reply(reply)
+        else:
+            for i in range(0, len(reply), 1900):
+                await ctx.send(reply[i:i+1900])
+
     except Exception as e:
-        print("[Groq] Nätverksfel:", repr(e))
-        await ctx.reply(f"Nätverksfel mot Groq:\n`{e}`")
-        return
+        print("[Groq] Oväntat fel i gpt-kommandot:", repr(e))
+        await ctx.reply(f"Något gick snett i gpt-kommandot:\n`{repr(e)}`")
 
-    print("[Groq] Statuskod:", resp.status_code)
-    print("[Groq] Förhandsvisning av svar:", resp.text[:300])
-
-    if resp.status_code != 200:
-        await ctx.reply(f"Groq API-fel {resp.status_code}:\n```{resp.text[:300]}```")
-        return
-
-    # Tolka JSON-svaret
-    try:
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
-    except Exception as e:
-        print("[Groq] JSON-fel:", repr(e))
-        await ctx.reply("Kunde inte tolka svaret från Groq.")
-        return
-
-    if not reply:
-        reply = "Jag fick ett tomt svar walla"
-
-    # Skicka svaret (hantera långa)
-    if len(reply) <= 2000:
-        await ctx.reply(reply)
-    else:
-        for i in range(0, len(reply), 1900):
-            await ctx.send(reply[i:i+1900])
 
 
 # ============================
