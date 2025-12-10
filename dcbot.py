@@ -6,7 +6,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # Python 3.9+
-from openai import OpenAI
+import requests
 
 
 load_dotenv()
@@ -16,12 +16,6 @@ api_key = os.getenv("MY_OPENAI_KEY")
 print("DEBUG - MY_OPENAI_KEY =", api_key)
 
 if api_key is None:
-    print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
-
-client = OpenAI(api_key=api_key)
-
-
-if os.getenv("MY_OPENAI_KEY") is None:
     print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
 
 
@@ -222,6 +216,41 @@ async def hebbe(ctx):
     msg = '**Onlinetider (senaste 7 dagarna):**\n```text\n' + '\n'.join(lines) + '\n```'
     await ctx.send(msg)
 
+
+def ask_gpt(prompt: str) -> str:
+    """Skickar prompten till OpenAI via HTTP och returnerar textsvar."""
+    if api_key is None:
+        raise RuntimeError("Ingen MY_OPENAI_KEY är satt")
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",  # funkar med nya API:t
+        "messages": [
+            {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 512,
+    }
+
+    print("DEBUG - skickar HTTP-request till OpenAI...")
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=20)
+
+    print("DEBUG - HTTP-status:", resp.status_code)
+    if resp.status_code != 200:
+        # logga hela svaret för debugging
+        print("DEBUG - HTTP-body:", resp.text)
+        raise RuntimeError(f"OpenAI svarade med status {resp.status_code}: {resp.text[:200]}")
+
+    data = resp.json()
+    reply = data["choices"][0]["message"]["content"]
+    return reply
+
+
 @bot.command(name="gpt")
 async def gpt(ctx, *, prompt: str | None = None):
     """Skickar prompten till ChatGPT och svarar med svaret."""
@@ -235,23 +264,12 @@ async def gpt(ctx, *, prompt: str | None = None):
     await ctx.trigger_typing()
 
     try:
-        # Säkert, modernt anrop – gpt-4o-mini + chat.completions
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=512,
-        )
-
-        reply = completion.choices[0].message.content
+        reply = ask_gpt(prompt)
         print("DEBUG - OpenAI-svar:", repr(reply))
 
         if not reply:
-            reply = "Jag fick ett tomt svar från modellen, sori"
+            reply = "Jag fick ett tomt svar från modellen walla"
 
-        # Discord har 2000-teckensgräns
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
@@ -260,13 +278,12 @@ async def gpt(ctx, *, prompt: str | None = None):
 
     except Exception as e:
         import traceback
-        traceback.print_exc()  # full stack trace till Railway-loggar
-
-        # Skicka tillbaka själva felet till Discord så vi ser vad som händer
+        traceback.print_exc()
         await ctx.reply(
-            "Något gick fel när jag pratade med ChatGPT... six seven\n"
+            "Något gick fel när jag pratade med ChatGPT, rackarns\n"
             f"`{type(e).__name__}: {e}`"
         )
+
 
 
 
