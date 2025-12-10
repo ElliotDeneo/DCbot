@@ -10,10 +10,15 @@ from openai import OpenAI
 
 
 load_dotenv()
-token = os.getenv('DISCORD_TOKEN')
+token = os.getenv("DISCORD_TOKEN")
 
-print("DEBUG - OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
-client = OpenAI()
+api_key = os.getenv("MY_OPENAI_KEY")
+print("DEBUG - MY_OPENAI_KEY =", api_key)
+
+if api_key is None:
+    print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
+    # du kan välja att stoppa här om du vill
+client = OpenAI(api_key=api_key)
 
 
 if os.getenv("OPENAI_API_KEY") is None:
