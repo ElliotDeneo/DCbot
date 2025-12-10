@@ -6,17 +6,16 @@ import os
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import requests  # används för DeepSeek-anropet
+import requests
 
 # ============================
 #   LÄS MILJÖVARIABLER
 # ============================
 load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
-
 deepseek_key = os.getenv("DEEPSEEK_API_KEY")
-print("DEBUG - DEEPSEEK_API_KEY =", "SATT" if deepseek_key else "SAKNAS")
 
+print("DEBUG - DEEPSEEK_API_KEY =", "SATT" if deepseek_key else "SAKNAS")
 if not token:
     print("VARNING: DISCORD_TOKEN saknas i miljövariablerna!")
 if not deepseek_key:
@@ -29,7 +28,6 @@ handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
 OWNER_ID = 117317459819757575
 TIMEZONE = ZoneInfo('Europe/Stockholm')
-
 INTERVAL_FILE = 'presence_intervals.json'
 
 
@@ -47,6 +45,8 @@ def save_intervals(intervals):
 
 
 presence_intervals = load_intervals()
+last_status: discord.Status | None = None
+last_change_time: datetime | None = None
 
 
 def add_interval(start_dt: datetime, end_dt: datetime):
@@ -65,10 +65,6 @@ def add_interval(start_dt: datetime, end_dt: datetime):
 
     presence_intervals.append({'start': start_dt.isoformat(), 'end': end_dt.isoformat()})
     save_intervals(presence_intervals)
-
-
-last_status: discord.Status | None = None
-last_change_time: datetime | None = None
 
 
 def is_online_like(status: discord.Status) -> bool:
@@ -97,7 +93,6 @@ async def on_ready():
 
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
 
-    # Försök hitta din user i alla guilds
     owner_member = None
     for guild in bot.guilds:
         m = guild.get_member(OWNER_ID)
@@ -108,21 +103,17 @@ async def on_ready():
     now = datetime.now(TIMEZONE)
 
     if owner_member is None:
-        # Om du inte är i samma guild som botten → ingen presence kan hämtas
         print("VARNING: Kunde inte hitta OWNER_ID i någon guild.")
         last_status = discord.Status.offline
         last_change_time = now
         return
 
-    # Sätt status baserat på faktisk status
     current_status = owner_member.status
     last_status = current_status
 
-    # Om du är online → starta en intervall direkt från bot-start
     if is_online_like(current_status):
         last_change_time = now
     else:
-        # Om du är offline → ingen aktiv intervall
         last_change_time = None
 
     print(f"Startstatus: {last_status}, last_change_time: {last_change_time}")
@@ -166,7 +157,7 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
 
 
 # ============================
-#   KOMMANDON
+#   BASIC KOMMANDON
 # ============================
 @bot.command()
 async def hello(ctx):
@@ -176,67 +167,69 @@ async def hello(ctx):
 async def dansa(ctx):
     await ctx.send('Du-du-du Hey-yeah-yeah-i-yeah \n' 'Vi undrar, är ni redo att vara med? \n' 'Armarna upp, nu ska ni få se \n' 'Kom igen Vem som helst kan vara med (Vara med) \n' 'Så rör på era fötter, o-a-a-a \n' 'Och vicka era höfter, o-la-la-la \n' 'Gör som vi. Till denna melodi \n' 'O-a, o-a-a \n' 'Dansa med oss, klappa era händer \n' 'Gör som vi gör, ta några steg åt vänster \n' 'Lyssna och lär, missa inte chansen \n' 'Nu är vi här med caramelldansen')
 
-
 # ============================
-#   DEEPSEEK GPT-FUNKTION
+#   GPT / DEEPSEEK-KOMMANDO
 # ============================
 @bot.command(name="gpt")
 async def gpt(ctx, *, prompt: str | None = None):
-    """Skickar prompten till DeepSeek och svarar med svaret."""
+    """Skickar prompten till DeepSeek och svarar i Discord."""
     print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
 
     if not prompt:
-        await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
+        await ctx.reply("Du måste skriva något efter kommandot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
     await ctx.trigger_typing()
 
     DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
     if not DEEPSEEK_KEY:
-        await ctx.reply("DeepSeek-nyckel saknas (DEEPSEEK_API_KEY). Kolla Railway Variables.")
+        await ctx.reply("DeepSeek API-nyckel saknas. Sätt DEEPSEEK_API_KEY i Railway.")
         return
 
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_KEY}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
     payload = {
         "model": "deepseek-chat",
         "messages": [
-            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server. Svara som om du är en kroniskt online meme-besatt ungdom."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "Du är en hjälpsam svensk assistent i en Discord-server."},
+            {"role": "user", "content": prompt}
         ],
         "max_tokens": 512,
-        "stream": False,
+        "stream": False
     }
 
-    print("[DeepSeek] Skickar request ...")
+    print("[DeepSeek] Skickar request...")
+
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        resp = requests.post(url, json=payload, headers=headers, timeout=20)
     except Exception as e:
         print("[DeepSeek] Nätverksfel:", repr(e))
         await ctx.reply(f"Nätverksfel mot DeepSeek:\n`{e}`")
         return
 
-    print("[DeepSeek] Fick svar, statuskod:", resp.status_code)
-    print("[DeepSeek] Rått svar (första 400 tecken):", resp.text[:400])
+    print("[DeepSeek] Statuskod:", resp.status_code)
+    print("[DeepSeek] Rått svar (början):", resp.text[:300])
 
     if resp.status_code != 200:
-        await ctx.reply(f"DeepSeek API error {resp.status_code}:\n```text\n{resp.text[:300]}\n```")
+        await ctx.reply(f"DeepSeek API-fel {resp.status_code}:\n```{resp.text[:300]}```")
         return
 
+    # Tolka JSON
     try:
         data = resp.json()
         reply = data["choices"][0]["message"]["content"]
     except Exception as e:
-        print("[DeepSeek] JSON-/formatfel:", repr(e))
+        print("[DeepSeek] JSON-fel:", repr(e))
         await ctx.reply("Kunde inte tolka svaret från DeepSeek.")
         return
 
     if not reply:
         reply = "Jag fick ett tomt svar från modellen."
 
+    # Svara – dela upp om >2000 tecken
     if len(reply) <= 2000:
         await ctx.reply(reply)
     else:
@@ -244,6 +237,8 @@ async def gpt(ctx, *, prompt: str | None = None):
             await ctx.send(reply[i:i+1900])
 
 
-
-# ====== KÖR BOTTEN ======
+# ============================
+#   STARTA BOTTEN
+# ============================
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+
