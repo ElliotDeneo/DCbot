@@ -25,8 +25,6 @@ if os.getenv("OPENAI_API_KEY") is None:
     print("VARNING: OPENAI_API_KEY saknas i miljövariablerna!")
 
 
-client = OpenAI()
-
 
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
@@ -238,7 +236,7 @@ async def gpt(ctx, *, prompt: str | None = None):
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",   # funkar med chat.completions
+            model="gpt-3.5-turbo",   # funkar med chat.completions
             messages=[
                 {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
                 {"role": "user", "content": prompt},
