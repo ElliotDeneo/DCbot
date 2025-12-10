@@ -223,9 +223,8 @@ async def gpt(ctx, *, prompt: str | None = None):
     await ctx.trigger_typing()  # visar "botten skriver..."
 
     try:
-        # Skicka prompten till OpenAI
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",  # stabil liten modell för API
+            model="gpt-4.1-mini",  # liten, snabb modell som funkar i chat.completions
             messages=[
                 {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
                 {"role": "user", "content": prompt},
@@ -234,7 +233,6 @@ async def gpt(ctx, *, prompt: str | None = None):
 
         reply = completion.choices[0].message.content
 
-        # Discord har max 2000 tecken per meddelande
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
@@ -242,11 +240,11 @@ async def gpt(ctx, *, prompt: str | None = None):
                 await ctx.send(reply[i:i+1900])
 
     except Exception as e:
-        # Logga felet i Railway-loggen
+        # Logga till Railway
         print(f"Fel vid OpenAI-anrop: {type(e).__name__}: {e}")
-        # Visa felet i Discord så vi ser vad som händer
+        # Visa felet i Discord så vi ser exakt vad som är fel
         await ctx.reply(
-            f"Något gick fel när jag pratade med ChatGPT \n`{type(e).__name__}: {e}`"
+            f"Något gick fel när jag pratade med ChatGPT 😢\n`{type(e).__name__}: {e}`"
         )
 
 
