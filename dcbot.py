@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import os
 import json
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # Python 3.9+
+from zoneinfo import ZoneInfo
 import requests
 
 
@@ -13,19 +13,20 @@ load_dotenv()
 token = os.getenv("DISCORD_TOKEN")
 
 api_key = os.getenv("MY_OPENAI_KEY")
-print("DEBUG - MY_OPENAI_KEY =", api_key)
+print("DEBUG - MY_OPENAI_KEY =", "SATT" if api_key else "SAKNAS")
 
 if api_key is None:
     print("VARNING: MY_OPENAI_KEY saknas i miljövariablerna!")
 
 
-
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
-OWNER_ID = 117317459819757575 
+OWNER_ID = 117317459819757575
 TIMEZONE = ZoneInfo('Europe/Stockholm')
 
 INTERVAL_FILE = 'presence_intervals.json'
+
+# --- Din övriga kod (load_intervals, save_intervals, etc.) är densamma ---
 
 def load_intervals():
     try:
@@ -217,10 +218,46 @@ async def hebbe(ctx):
     await ctx.send(msg)
 
 
-def ask_gpt(prompt: str) -> str:
-    # Tillfällig testfunktion utan OpenAI
-    print("DEBUG - ask_gpt kallades med prompt:", repr(prompt))
-    return f"TESTSVAR (lokalt): {prompt}"
+# **NY LOGIK FÖR OPENAI VIA REQUESTS (ASYNKRONT HANTERAD)**
+def sync_ask_gpt(prompt: str) -> str:
+    """Skickar prompten till OpenAI via HTTP (synkront) och returnerar textsvar."""
+    global api_key
+    if api_key is None:
+        raise RuntimeError("Ingen MY_OPENAI_KEY är satt.")
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini", # Giltig, snabb och billig modell
+        "messages": [
+            {"role": "system", "content": "Du är en hjälpsam assistent i en Discord-server."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.7
+    }
+
+    print("DEBUG - skickar HTTP-request till OpenAI...")
+    # Använder requests (synkront)
+    resp = requests.post(url, headers=headers, json=payload, timeout=30) 
+
+    print("DEBUG - HTTP-status:", resp.status_code)
+    
+    if resp.status_code != 200:
+        print("DEBUG - HTTP-body:", resp.text)
+        # Inkludera en tydligare felhantering för icke-200 svar
+        raise RuntimeError(f"OpenAI svarade med status {resp.status_code}. Kontrollera API-nyckeln och användning i loggfilen.")
+
+    try:
+        data = resp.json()
+        reply = data["choices"][0]["message"]["content"]
+        return reply
+    except (json.JSONDecodeError, KeyError) as e:
+        print("DEBUG - JSON/KeyError vid parsing av svar:", resp.text)
+        raise RuntimeError(f"Kunde inte tolka svaret från OpenAI: {e}")
 
 
 @bot.command(name="gpt")
@@ -232,19 +269,23 @@ async def gpt(ctx, *, prompt: str | None = None):
         await ctx.reply("Du måste skriva något efter kommandot idiot, t.ex. `!gpt skriv en dikt om 67`")
         return
 
-    await ctx.reply("(debug) Jag ska höra med OpenAI...")
+    await ctx.reply("Jag ska höra med OpenAI...")
     await ctx.trigger_typing()
 
     try:
-        reply = ask_gpt(prompt)
+        # Kör den synkrona funktionen i en separat tråd för att undvika blockering
+        reply = await bot.loop.run_in_executor(None, sync_ask_gpt, prompt)
+        
         print("DEBUG - OpenAI-svar:", repr(reply))
 
         if not reply:
             reply = "Jag fick ett tomt svar från modellen walla"
 
+        # Skicka svaret, dela upp det om det är för långt
         if len(reply) <= 2000:
             await ctx.reply(reply)
         else:
+            await ctx.send(f"**Svar till {ctx.author.mention} (del 1):**")
             for i in range(0, len(reply), 1900):
                 await ctx.send(reply[i:i+1900])
 
@@ -253,13 +294,9 @@ async def gpt(ctx, *, prompt: str | None = None):
         traceback.print_exc()
         await ctx.reply(
             "Något gick fel när jag pratade med ChatGPT, rackarns\n"
-            f"`{type(e).__name__}: {e}`"
+            f"`{type(e).__name__}: {e}`\n"
+            "Kontrollera loggfilen (dcbot.log) för detaljer, särskilt HTTP-statuskod."
         )
 
 
-
-
-
-
- 
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
