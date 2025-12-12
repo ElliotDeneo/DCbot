@@ -1083,7 +1083,7 @@ async def bet(ctx, amount: str = None, color: str = None):
         )
 
     # -----------------------------
-    # Spin animation (wheel strip)
+    # Spin animation (5-step fast spin)
     # -----------------------------
     result_num = rng.randrange(0, 37)
     result_col = roulette_color(result_num)
@@ -1103,35 +1103,34 @@ async def bet(ctx, amount: str = None, color: str = None):
 
     idx = rng.randrange(0, len(WHEEL))
 
-    # Phase 1: fast random spin
-    for _ in range(10):
-        idx = (idx + rng.randrange(2, 6)) % len(WHEEL)
-        ok = await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
-        if not ok:
-            return
-        await asyncio.sleep(0.10)
+    # EDIT 1 – instant start
+    idx = (idx + rng.randrange(6, 10)) % len(WHEEL)
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await asyncio.sleep(0.12)
 
-    # Phase 2: jump toward target in bigger steps
+    # EDIT 2 – fast jump
+    idx = (idx + rng.randrange(6, 10)) % len(WHEEL)
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await asyncio.sleep(0.12)
+
+    # EDIT 3 – slower approach
     dist = (target_idx - idx) % len(WHEEL)
-    while dist > 8:
-        step = min(4, dist - 8)
-        idx = (idx + step) % len(WHEEL)
-        dist = (target_idx - idx) % len(WHEEL)
+    idx = (idx + max(1, dist // 2)) % len(WHEEL)
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await asyncio.sleep(0.15)
 
-        ok = await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
-        if not ok:
-            return
-        await asyncio.sleep(0.14)
+    # EDIT 4 – almost there
+    dist = (target_idx - idx) % len(WHEEL)
+    idx = (idx + max(1, dist - 1)) % len(WHEEL)
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await asyncio.sleep(0.18)
 
-    # Phase 3: slow final steps to land exactly on target
-    while idx != target_idx:
-        idx = (idx + 1) % len(WHEEL)
-        ok = await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
-        if not ok:
-            return
-        await asyncio.sleep(0.20)
-
+    # EDIT 5 – final landing (exact result)
     final_strip = f"```text\n{render_strip(target_idx)}\n```"
+    await safe_edit(f"🎰 Snurrar...\n{final_strip}")
+    await asyncio.sleep(0.10)
+
+
 
     # -----------------------------
     # Resolve bet + payout
@@ -1162,6 +1161,7 @@ async def bet(ctx, amount: str = None, color: str = None):
             f"❌ {ctx.author.mention} förlorade **{bet_amount}** coins unluko\n"
             f"💰 Ny balante: **{bal_now}**"
         ))
+
 
 
 #BET COOLDOWN
