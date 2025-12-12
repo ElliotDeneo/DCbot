@@ -12,8 +12,6 @@ from typing import Optional
 import asyncpg
 import sys
 
-discord.utils.setup_logging(level=logging.INFO)
-
 # ============================
 #   LÄS MILJÖVARIABLER
 # ============================
@@ -34,6 +32,7 @@ if not groq_key:
 handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
 OWNER_ID = 117317459819757575
+ADMIN_IDS = {112253106359664640}
 TIMEZONE = ZoneInfo('Europe/Stockholm')
 
 # ============================
@@ -141,6 +140,63 @@ async def econ_deposit(user_id: int, amount: int) -> int:
                 new_balance, user_id
             )
             return new_balance
+
+async def econ_transfer(sender_id: int, receiver_id: int, amount: int):
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+
+            # 🔒 ALWAYS lock in the same order
+            a, b = sorted([sender_id, receiver_id])
+
+            row_a = await conn.fetchrow(
+                "SELECT user_id, balance FROM economy WHERE user_id=$1 FOR UPDATE",
+                a
+            )
+            if row_a is None:
+                await conn.execute(
+                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
+                    a
+                )
+                bal_a = 0
+            else:
+                bal_a = int(row_a["balance"])
+
+            row_b = await conn.fetchrow(
+                "SELECT user_id, balance FROM economy WHERE user_id=$1 FOR UPDATE",
+                b
+            )
+            if row_b is None:
+                await conn.execute(
+                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
+                    b
+                )
+                bal_b = 0
+            else:
+                bal_b = int(row_b["balance"])
+
+            # Map balances back to sender/receiver
+            if sender_id == a:
+                sender_bal, receiver_bal = bal_a, bal_b
+            else:
+                sender_bal, receiver_bal = bal_b, bal_a
+
+            if sender_bal < amount:
+                return None
+
+            sender_bal -= amount
+            receiver_bal += amount
+
+            await conn.execute(
+                "UPDATE economy SET balance=$1 WHERE user_id=$2",
+                sender_bal, sender_id
+            )
+            await conn.execute(
+                "UPDATE economy SET balance=$1 WHERE user_id=$2",
+                receiver_bal, receiver_id
+            )
+
+            return sender_bal, receiver_bal
+
 
 
 # ============================
@@ -953,8 +1009,94 @@ async def commands_list(ctx):
 
     await ctx.send(embed=embed)
 
+@bot.command(help="Skicka cöins till någon. Ex: !send 200 @user")
+async def send(ctx, amount: str = None, *, member: discord.Member = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
 
+    if amount is None or member is None:
+        await ctx.reply("Ex: `!send 200 @user`")
+        return
 
+    if member.bot:
+        await ctx.reply("Du kan inte skicka coins till en bot.")
+        return
+
+    if member.id == ctx.author.id:
+        await ctx.reply("Du kan inte skicka coins till dig själv bror")
+        return
+
+    # Parse amount
+    if amount.lower() == "all":
+        bal, _ = await econ_get(ctx.author.id)
+        if bal <= 0:
+            await ctx.reply("Du har inga coins att skicka idiot.")
+            return
+        send_amount = bal
+    else:
+        try:
+            send_amount = int(amount)
+        except ValueError:
+            await ctx.reply("Amount måste vara ett heltal (eller `all`).")
+            return
+
+        if send_amount <= 0:
+            await ctx.reply("Amount måste vara > 0.")
+            return
+
+    # Do atomic transfer
+    result = await econ_transfer(ctx.author.id, member.id, send_amount)
+    if result is None:
+        bal, _ = await econ_get(ctx.author.id)
+        await ctx.reply(f"Du har inte tillräckligt, fattiglapp. Din balans: **{bal}** 💰")
+        return
+
+    new_sender, new_receiver = result
+    await ctx.reply(
+        f"✅ {ctx.author.mention} skickade **{send_amount}** coins till {member.mention}\n"
+        f"💸 Din balans: **{new_sender}** | {member.display_name}: **{new_receiver}**"
+    )
+
+def is_admin():
+    async def predicate(ctx: commands.Context):
+        return ctx.author.id in ADMIN_IDS
+    return commands.check(predicate)
+
+@bot.command(hidden=True, help="(Elliot) Give coins. Ex: !give 100 @user")
+@is_admin()
+async def give(ctx, amount: str = None, *, member: discord.Member = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+
+    if amount is None or member is None:
+        await ctx.reply("Ex: `!give 100 @user`")
+        return
+
+    if member.bot:
+        await ctx.reply("Du kan inte ge coins till en bot.")
+        return
+
+    try:
+        amt = int(amount)
+    except ValueError:
+        await ctx.reply("Amount måste vara ett heltal.")
+        return
+
+    if amt <= 0:
+        await ctx.reply("Amount måste vara > 0.")
+        return
+
+    new_bal = await econ_deposit(member.id, amt)
+    await ctx.reply(f"✅ Gav **{amt}** coins till {member.mention}. Ny balans: **{new_bal}** 💰")
+
+@give.error
+async def give_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.reply("❌ Nt degen. Du har inte behörighet att använda `!give`.")
+        return
+    raise error
 
 # ============================
 #   STARTA BOTTEN
