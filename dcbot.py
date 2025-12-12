@@ -46,7 +46,6 @@ def db_is_ready() -> bool:
 
 
 async def init_db():
-    """Connect to Postgres and ensure tables exist."""
     global db_pool
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
@@ -63,6 +62,13 @@ async def init_db():
         );
         """)
 
+        await conn.execute(
+            "ALTER TABLE economy ADD COLUMN IF NOT EXISTS has_bet BOOLEAN NOT NULL DEFAULT FALSE;"
+        )
+        await conn.execute(
+            "ALTER TABLE economy ADD COLUMN IF NOT EXISTS welcome_claimed BOOLEAN NOT NULL DEFAULT FALSE;"
+        )
+
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS presence_intervals (
             id BIGSERIAL PRIMARY KEY,
@@ -71,6 +77,7 @@ async def init_db():
             end_ts   TIMESTAMPTZ
         );
         """)
+
 
 
 # ============================
@@ -197,6 +204,43 @@ async def econ_transfer(sender_id: int, receiver_id: int, amount: int):
 
             return sender_bal, receiver_bal
 
+
+
+WELCOME_BONUS = 300
+
+async def econ_claim_welcome(user_id: int, bonus: int = WELCOME_BONUS) -> Optional[int]:
+    """
+    Gives welcome bonus once, only if user has never bet.
+    Returns new balance if success, otherwise None.
+    """
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT balance, has_bet, welcome_claimed FROM economy WHERE user_id=$1 FOR UPDATE",
+                user_id
+            )
+
+            if row is None:
+                await conn.execute(
+                    "INSERT INTO economy(user_id, balance, last_daily, has_bet, welcome_claimed) "
+                    "VALUES($1, 0, NULL, FALSE, FALSE)",
+                    user_id
+                )
+                balance, has_bet, welcome_claimed = 0, False, False
+            else:
+                balance = int(row["balance"])
+                has_bet = bool(row["has_bet"])
+                welcome_claimed = bool(row["welcome_claimed"])
+
+            if has_bet or welcome_claimed:
+                return None
+
+            new_balance = balance + bonus
+            await conn.execute(
+                "UPDATE economy SET balance=$1, welcome_claimed=TRUE WHERE user_id=$2",
+                new_balance, user_id
+            )
+            return new_balance
 
 
 # ============================
@@ -938,6 +982,12 @@ async def bet(ctx, amount: str = None, color: str = None):
     if new_bal_after_withdraw is None:
         await ctx.reply(f"Du har inte tillräckligt med coins brokeboy (balans: **{bal}**).")
         return
+    # Mark that user has placed a bet (ever)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE economy SET has_bet=TRUE WHERE user_id=$1",
+            ctx.author.id
+        )
 
     # Spin animation
     spin_msg = await ctx.send(f"🎰 {ctx.author.mention} bettar **{bet_amount}** på {color_emoji(color)} **{color}**...")
@@ -950,14 +1000,16 @@ async def bet(ctx, amount: str = None, color: str = None):
     result_num = rng.randrange(0, 37)
     result_col = roulette_color(result_num)
 
+    win = (result_col == color)
+
     if color in ("red", "black"):
+        # Even-money bet (1:1)
         win_total_return = bet_amount * 2
         profit = bet_amount
     else:
-        win_total_return = bet_amount * 15
-        profit = bet_amount * 14
-
-    win = (result_col == color)
+        # Betting on 0 like real roulette (35:1)
+        win_total_return = bet_amount * 36
+        profit = bet_amount * 35
 
     if win:
         new_bal = await econ_deposit(ctx.author.id, win_total_return)
@@ -968,7 +1020,6 @@ async def bet(ctx, amount: str = None, color: str = None):
             f"💰 Ny balans: **{new_bal}**"
         ))
     else:
-        # balance already reduced
         bal_now, _ = await econ_get(ctx.author.id)
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
@@ -1097,6 +1148,21 @@ async def give_error(ctx, error):
         await ctx.reply("❌ Nt degen. Du har inte behörighet att använda `!give`.")
         return
     raise error
+
+
+@bot.command(help="Få en välkomstbonus på 300 coins (bara om du aldrig bettat!!).")
+async def welcomebonus(ctx):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+
+    new_bal = await econ_claim_welcome(ctx.author.id, 300)
+    if new_bal is None:
+        await ctx.reply("❌ Du kan inte claima welcome bonus (antingen redan claimad eller så har du redan bettat).")
+        return
+
+    await ctx.reply(f"🎁 {ctx.author.mention} fick **300 coins** i welcome bonus! Ny balans: **{new_bal}** 💰")
+
 
 # ============================
 #   STARTA BOTTEN
