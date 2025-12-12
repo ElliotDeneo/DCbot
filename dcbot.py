@@ -7,6 +7,9 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
+import asyncio
+import random
+from typing import Optional
 
 # ============================
 #   LÄS MILJÖVARIABLER
@@ -46,7 +49,7 @@ def save_intervals(intervals):
 
 
 presence_intervals = load_intervals()
-last_status: discord.Status | None = None
+last_status: Optional[discord.Status] = None
 last_change_time: datetime | None = None
 
 
@@ -127,6 +130,7 @@ async def on_ready():
     print(f"Startstatus: {last_status}, last_change_time: {last_change_time}")
 
 
+#   SIX SEVEN RESPONSE
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -136,7 +140,6 @@ async def on_message(message):
         await message.channel.send('SIX SEVEN!')
 
     await bot.process_commands(message)
-
 
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
@@ -163,15 +166,15 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
 
     last_status = after.status
 
-@bot.command()
+@bot.command(help="Säger hej till dig. Mest för debug")
 async def hello(ctx):
     await ctx.send(f'Hello {ctx.author.mention}!!')
 
-@bot.command()
+@bot.command(help="Skickar Caramelldansen-lyrics.")
 async def dansa(ctx):
     await ctx.send('Du-du-du Hey-yeah-yeah-i-yeah \n' 'Vi undrar, är ni redo att vara med? \n' 'Armarna upp, nu ska ni få se \n' 'Kom igen Vem som helst kan vara med (Vara med) \n' 'Så rör på era fötter, o-a-a-a \n' 'Och vicka era höfter, o-la-la-la \n' 'Gör som vi. Till denna melodi \n' 'O-a, o-a-a \n' 'Dansa med oss, klappa era händer \n' 'Gör som vi gör, ta några steg åt vänster \n' 'Lyssna och lär, missa inte chansen \n' 'Nu är vi här med caramelldansen')
 
-@bot.command()
+@bot.command(help="Visar exakta onlinetider för hebbe senaste 7 dagarna.")
 async def hebbe(ctx):
     """Visar exakta onlinetider (start–slut) per dag senaste 7 dagarna."""
     now = datetime.now(TIMEZONE)
@@ -241,7 +244,7 @@ async def hebbe(ctx):
 # ============================
 #   GPT / GROQ-KOMMANDO
 # ============================
-@bot.command(name="gpt")
+@bot.command(name="gpt", help="Chatta med schizo-AI.")
 async def gpt(ctx, *, prompt: str | None = None):
     """Skickar prompten till en sån där AI och återkommer."""
     print(f"!gpt triggat av {ctx.author} med prompt: {prompt!r}")
@@ -302,7 +305,7 @@ async def gpt(ctx, *, prompt: str | None = None):
         print("[Groq] Förhandsvisning av svar:", resp.text[:300])
 
         if resp.status_code != 200:
-            await ctx.reply(f"Groq API-fel {resp.statuscode}:\n```{resp.text[:300]}```")
+            await ctx.reply(f"Groq API-fel {resp.status_code}:\n```{resp.text[:300]}```")
             return
 
         try:
@@ -340,7 +343,7 @@ async def gpt(ctx, *, prompt: str | None = None):
 
 
 
-@bot.command()
+@bot.command(help="Nollställer AI-minnet, om den fuckar ur.")
 async def resetgpt(ctx):
     """Nollställer korttidsminnet i den här kanalen."""
     channel_id = ctx.channel.id
@@ -355,7 +358,7 @@ async def resetgpt(ctx):
 # ============================
 #   GEMMA / GOOGLE AI KOMMANDO
 # ============================
-@bot.command(name="gg")
+@bot.command(name="gg", help="Fråga en bättre AI, ger vettiga svar.")
 async def gg(ctx, *, prompt: str | None = None):
     """Fråga Google Gemini (flash-modellen)."""
     print(f"!gg triggat av {ctx.author} med prompt: {prompt!r}")
@@ -423,7 +426,7 @@ async def gg(ctx, *, prompt: str | None = None):
         await ctx.reply(f"Något gick snett i !gg-kommandot:\n`{repr(e)}`")
 
 
-@bot.command(name="summary1h")
+@bot.command(name="summary1h", help="Sammanfattar chatten den senaste timmen.")
 async def summary1h(ctx):
     """Sammanfattar alla meddelanden i den här kanalen senaste timmen med Gemini."""
     print(f"[summary1h] triggat av {ctx.author} i kanal {ctx.channel.id}")
@@ -532,6 +535,248 @@ async def summary1h(ctx):
         import traceback
         traceback.print_exc()
         await ctx.send(f"summary1h kraschade:\n`{type(e).__name__}: {e}`")
+
+
+
+#   ECONOMY OCH ROULETTE
+
+COINS_FILE = "coins.json"
+DAILY_COINS = 100
+MAX_BET = DAILY_COINS * 10  # 10x daily
+
+economy_lock = asyncio.Lock()
+rng = random.SystemRandom()
+
+def load_coins():
+    try:
+        with open(COINS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_coins(data):
+    with open(COINS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+economy = load_coins()
+
+def get_user(econ: dict, user_id: int):
+    uid = str(user_id)
+    if uid not in econ:
+        econ[uid] = {"balance": 0, "last_daily": None}
+    return econ[uid]
+
+# Roulette helpers (European roulette: 0-36, 0 is green)
+RED_NUMS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+BLACK_NUMS = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+
+def roulette_color(n: int) -> str:
+    if n == 0:
+        return "green"
+    return "red" if n in RED_NUMS else "black"
+
+def color_emoji(color: str) -> str:
+    return {"red": "🔴", "black": "⚫", "green": "🟢"}[color]
+
+
+
+
+#   DAILY FUNC SOM GET 100c
+@bot.command(help="Få 100 coins var 24:e timme.")
+async def daily(ctx):
+    now = datetime.now(TIMEZONE)
+
+    async with economy_lock:
+        user = get_user(economy, ctx.author.id)
+
+        if user["last_daily"]:
+            last = datetime.fromisoformat(user["last_daily"]).astimezone(TIMEZONE)
+            if now - last < timedelta(hours=24):
+                remaining = timedelta(hours=24) - (now - last)
+                hours, rem = divmod(int(remaining.total_seconds()), 3600)
+                mins = (rem // 60)
+                await ctx.reply(f"Du har redan claimat daily för fan. Kom tillbaka om **{hours}h {mins}m**.")
+                return
+
+        user["balance"] += DAILY_COINS
+        user["last_daily"] = now.isoformat()
+        save_coins(economy)
+        bal = user["balance"]
+
+    await ctx.reply(f"✅ {ctx.author.mention} fick **{DAILY_COINS} coins**! Ny balante: **{bal}** 💰")
+
+
+# BALANCE COMMAND
+@bot.command(aliases=["bal"], help="Visar din coin-balans.")
+async def balance(ctx, member: discord.Member | None = None):
+    member = member or ctx.author
+    async with economy_lock:
+        user = get_user(economy, member.id)
+        bal = user["balance"]
+    await ctx.reply(f"💰 {member.display_name} har **{bal} coins**.")
+
+
+# LEADERBOARD COMMAND
+@bot.command(help="Visar top 10 rikaste spelarna i servern.")
+async def leaderboard(ctx):
+    async with economy_lock:
+        # Build list of (member, balance) only for current guild members
+        rows = []
+        for uid, data in economy.items():
+            m = ctx.guild.get_member(int(uid))
+            if m is None:
+                continue
+            rows.append((m, int(data.get("balance", 0))))
+
+    if not rows:
+        await ctx.reply("Ingen har coins än walla Skriv `!daily` för att starta economy.")
+        return
+
+    rows.sort(key=lambda x: x[1], reverse=True)
+    top = rows[:10]
+
+    embed = discord.Embed(title="🏆 Leaderboard (Top 10)", description="Mest cash på servern", color=0xF1C40F)
+    lines = []
+    for i, (m, bal) in enumerate(top, start=1):
+        lines.append(f"**#{i}** {m.display_name} — **{bal}** 💰")
+
+    embed.add_field(name="Ranking", value="\n".join(lines), inline=False)
+    embed.set_footer(text=f"Max bet: {MAX_BET} | Daily: {DAILY_COINS}/24h")
+
+    await ctx.send(embed=embed)
+
+
+
+#BET COMMAND
+#endast red black green
+#max bet 1000
+#cooldown är 1bet / 3 sec
+@bot.command(help="Bettar coins på red, black eller green. Ex: !bet 100 red eller !bet all green")
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def bet(ctx, amount: str = None, color: str = None):
+    if amount is None or color is None:
+        await ctx.reply("Ex: `!bet 100 red` | `!bet all black` | `!bet 50 green`")
+        return
+
+    color = color.lower().strip()
+    if color not in ("red", "black", "green"):
+        await ctx.reply("Du kan bara betta på: `red`, `black`, `green`.")
+        return
+
+    # Resolve amount
+    async with economy_lock:
+        user = get_user(economy, ctx.author.id)
+        bal = int(user["balance"])
+
+    if amount.lower() == "all":
+        if bal <= 0:
+            await ctx.reply("Du har **0 coins**. Claim `!daily` först kanske")
+            return
+        bet_amount = min(bal, MAX_BET)  # all-in but still capped by MAX_BET
+        all_in = True
+    else:
+        try:
+            bet_amount = int(amount)
+        except:
+            await ctx.reply("Amount måste vara ett tal eller `all`.")
+            return
+
+        if bet_amount <= 0:
+            await ctx.reply("Amount måste vara > 0.")
+            return
+
+        if bet_amount > MAX_BET:
+            await ctx.reply(f"Max bet är **{MAX_BET}** (10x daily).")
+            return
+
+        all_in = False
+
+    # Check funds + deduct stake upfront
+    async with economy_lock:
+        user = get_user(economy, ctx.author.id)
+        if user["balance"] < bet_amount:
+            await ctx.reply(f"Du har bara **{user['balance']} coins**. Fattig")
+            return
+        user["balance"] -= bet_amount
+        save_coins(economy)
+
+    # Spin animation
+    spin_msg = await ctx.send(f"🎰 {ctx.author.mention} bettar **{bet_amount}** på {color_emoji(color)} **{color}**...")
+    for _ in range(6):
+        fake_num = rng.randrange(0, 37)
+        fake_col = roulette_color(fake_num)
+        await spin_msg.edit(content=f"🎰 Snurrar... {color_emoji(fake_col)} **{fake_num}**")
+        await asyncio.sleep(0.35)
+
+    # Final result
+    result_num = rng.randrange(0, 37)
+    result_col = roulette_color(result_num)
+
+    # Payouts (profit-based)
+    # red/black: 1:1 profit (win returns 2x total including stake)
+    # green: 14:1 profit (win returns 15x total including stake)
+    if color in ("red", "black"):
+        win_total_return = bet_amount * 2
+        profit = bet_amount
+    else:
+        win_total_return = bet_amount * 15
+        profit = bet_amount * 14
+
+    win = (result_col == color)
+
+    async with economy_lock:
+        user = get_user(economy, ctx.author.id)
+        if win:
+            user["balance"] += win_total_return
+        save_coins(economy)
+        new_bal = int(user["balance"])
+
+    if win:
+        extra = " (ALL-IN )" if all_in else ""
+        await spin_msg.edit(content=(
+            f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
+            f"✅ {ctx.author.mention} vann{extra}! +**{profit}** profit\n"
+            f"💰 Ny balans: **{new_bal}**"
+        ))
+    else:
+        await spin_msg.edit(content=(
+            f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
+            f"❌ {ctx.author.mention} förlorade **{bet_amount}** coins rip\n"
+            f"💰 Ny balans: **{new_bal}**"
+        ))
+
+#BET COOLDOWN
+@bet.error
+async def bet_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.reply(f"Chilla, vänta **{error.retry_after:.1f}s** innan nästa bet.")
+    else:
+        raise error
+
+
+#LISTA ALLA COMMANDS
+@bot.command(name="commands", help="Visar alla commands.")
+async def commands_list(ctx):
+    embed = discord.Embed(title="📜 Commands", description="Här är allt jag kan göra:", color=0x5865F2)
+
+    items = []
+    for cmd in bot.commands:
+        if cmd.hidden:
+            continue
+        brief = cmd.help or "—"
+        items.append((cmd.name, brief))
+
+    items.sort(key=lambda x: x[0])
+
+    # Show a few per field to avoid embed limits
+    lines = [f"`!{name}` — {brief}" for name, brief in items]
+    chunk = "\n".join(lines[:25])  # keep it safe
+
+    embed.add_field(name="Lista", value=chunk, inline=False)
+    embed.set_footer(text="Tips: skriv !daily, !bet, !leaderboard")
+
+    await ctx.send(embed=embed)
+
 
 
 
