@@ -1088,6 +1088,11 @@ async def bet(ctx, amount: str = None, color: str = None):
     result_num = rng.randrange(0, 37)
     result_col = roulette_color(result_num)
     target_idx = WHEEL.index(result_num)
+    
+    strip_width = 10
+    pointer_pos = strip_width // 2
+    landing_start = (target_idx - pointer_pos) % len(WHEEL)
+
 
     spin_msg = await ctx.send(
         f"🎰 {ctx.author.mention} bettar **{bet_amount}** på {color_emoji(color)} **{color}**...\n"
@@ -1105,30 +1110,31 @@ async def bet(ctx, amount: str = None, color: str = None):
 
     # EDIT 1 – instant start
     idx = (idx + rng.randrange(6, 10)) % len(WHEEL)
-    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx, width=strip_width)}\n```")
     await asyncio.sleep(0.12)
 
     # EDIT 2 – fast jump
     idx = (idx + rng.randrange(6, 10)) % len(WHEEL)
-    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx, width=strip_width)}\n```")
     await asyncio.sleep(0.12)
 
     # EDIT 3 – slower approach
-    dist = (target_idx - idx) % len(WHEEL)
+    dist = (landing_start - idx) % len(WHEEL)
     idx = (idx + max(1, dist // 2)) % len(WHEEL)
-    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx, width=strip_width)}\n```")
     await asyncio.sleep(0.15)
 
     # EDIT 4 – almost there
-    dist = (target_idx - idx) % len(WHEEL)
+    dist = (landing_start - idx) % len(WHEEL)
     idx = (idx + max(1, dist - 1)) % len(WHEEL)
-    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+    await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx, width=strip_width)}\n```")
     await asyncio.sleep(0.18)
 
     # EDIT 5 – final landing (exact result)
-    final_strip = f"```text\n{render_strip(target_idx)}\n```"
+    final_strip = f"```text\n{render_strip(landing_start, width=strip_width)}\n```"
     await safe_edit(f"🎰 Snurrar...\n{final_strip}")
     await asyncio.sleep(0.10)
+
 
 
 
