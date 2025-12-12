@@ -959,4 +959,5 @@ async def commands_list(ctx):
 # ============================
 #   STARTA BOTTEN
 # ============================
-bot.run(token, log_handler=handler, log_level=logging.DEBUG)
+bot.run(token, log_handler=handler, log_level=logging.INFO)
+
