@@ -3,7 +3,6 @@ from discord.ext import commands
 import logging
 from dotenv import load_dotenv
 import os
-import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
@@ -11,6 +10,7 @@ import asyncio
 import random
 from typing import Optional
 import asyncpg
+
 
 # ============================
 #   LÄS MILJÖVARIABLER
@@ -33,43 +33,139 @@ handler = logging.FileHandler(filename='dcbot.log', encoding='utf-8', mode='a')
 
 OWNER_ID = 117317459819757575
 TIMEZONE = ZoneInfo('Europe/Stockholm')
-INTERVAL_FILE = 'presence_intervals.json'
+
+# ============================
+#   DATABASE (Railway Postgres)
+# ============================
+db_pool: Optional[asyncpg.Pool] = None
+db_ready = False
+
+def db_is_ready() -> bool:
+    return db_pool is not None
 
 
-def load_intervals():
-    try:
-        with open(INTERVAL_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
+async def init_db():
+    """Connect to Postgres and ensure tables exist."""
+    global db_pool
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL saknas. Lägg till PostgreSQL i Railway.")
+
+    db_pool = await asyncpg.create_pool(dsn=database_url, min_size=1, max_size=5)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS economy (
+            user_id BIGINT PRIMARY KEY,
+            balance BIGINT NOT NULL DEFAULT 0,
+            last_daily TIMESTAMPTZ
+        );
+        """)
+
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS presence_intervals (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            start_ts TIMESTAMPTZ NOT NULL,
+            end_ts   TIMESTAMPTZ
+        );
+        """)
 
 
-def save_intervals(intervals):
-    with open(INTERVAL_FILE, 'w', encoding='utf-8') as f:
-        json.dump(intervals, f, indent=2)
+# ============================
+#   DB HELPERS: ECONOMY
+# ============================
+async def econ_get(user_id: int) -> tuple[int, Optional[datetime]]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT balance, last_daily FROM economy WHERE user_id=$1",
+            user_id
+        )
+        if row is None:
+            await conn.execute(
+                "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
+                user_id
+            )
+            return 0, None
+        return int(row["balance"]), row["last_daily"]
+
+async def econ_try_withdraw(user_id: int, amount: int) -> Optional[int]:
+    """Atomic: subtract stake if enough balance. Returns new balance or None."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT balance FROM economy WHERE user_id=$1 FOR UPDATE",
+                user_id
+            )
+            if row is None:
+                await conn.execute(
+                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
+                    user_id
+                )
+                balance = 0
+            else:
+                balance = int(row["balance"])
+
+            if balance < amount:
+                return None
+
+            new_balance = balance - amount
+            await conn.execute(
+                "UPDATE economy SET balance=$1 WHERE user_id=$2",
+                new_balance, user_id
+            )
+            return new_balance
+
+async def econ_deposit(user_id: int, amount: int) -> int:
+    """Atomic: add amount. Returns new balance."""
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT balance FROM economy WHERE user_id=$1 FOR UPDATE",
+                user_id
+            )
+            if row is None:
+                await conn.execute(
+                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
+                    user_id
+                )
+                balance = 0
+            else:
+                balance = int(row["balance"])
+
+            new_balance = balance + amount
+            await conn.execute(
+                "UPDATE economy SET balance=$1 WHERE user_id=$2",
+                new_balance, user_id
+            )
+            return new_balance
 
 
-presence_intervals = load_intervals()
+# ============================
+#   DB HELPERS: PRESENCE
+# ============================
+async def presence_get_last_7_days(user_id: int) -> list[tuple[datetime, datetime]]:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT start_ts, end_ts
+            FROM presence_intervals
+            WHERE user_id=$1
+              AND end_ts IS NOT NULL
+              AND end_ts >= NOW() - INTERVAL '7 days'
+            ORDER BY start_ts ASC
+        """, user_id)
+
+    return [(r["start_ts"], r["end_ts"]) for r in rows]
+
+
+
+
+
+
 last_status: Optional[discord.Status] = None
 last_change_time: datetime | None = None
 
 
-def add_interval(start_dt: datetime, end_dt: datetime):
-    if end_dt <= start_dt:
-        return
-
-    if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=TIMEZONE)
-    else:
-        start_dt = start_dt.astimezone(TIMEZONE)
-
-    if end_dt.tzinfo is None:
-        end_dt = end_dt.replace(tzinfo=TIMEZONE)
-    else:
-        end_dt = end_dt.astimezone(TIMEZONE)
-
-    presence_intervals.append({'start': start_dt.isoformat(), 'end': end_dt.isoformat()})
-    save_intervals(presence_intervals)
 
 
 def is_online_like(status: discord.Status) -> bool:
@@ -77,8 +173,40 @@ def is_online_like(status: discord.Status) -> bool:
         discord.Status.online,
         discord.Status.idle,
         discord.Status.dnd,
-        discord.Status.invisible,
     )
+
+
+async def presence_open_session(user_id: int, start_dt: datetime):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO presence_intervals(user_id, start_ts, end_ts)
+            VALUES($1, $2, NULL)
+        """, user_id, start_dt)
+
+async def presence_close_session(user_id: int, end_dt: datetime):
+    async with db_pool.acquire() as conn:
+        # Close the most recent open session
+        await conn.execute("""
+            UPDATE presence_intervals
+            SET end_ts = $2
+            WHERE id = (
+                SELECT id
+                FROM presence_intervals
+                WHERE user_id = $1 AND end_ts IS NULL
+                ORDER BY start_ts DESC
+                LIMIT 1
+            )
+        """, user_id, end_dt)
+
+async def presence_has_open_session(user_id: int) -> bool:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 1
+            FROM presence_intervals
+            WHERE user_id=$1 AND end_ts IS NULL
+            LIMIT 1
+        """, user_id)
+    return row is not None
 
 
 # ============================
@@ -92,6 +220,17 @@ intents.presences = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
+@bot.event
+async def on_disconnect():
+    global db_pool, db_ready
+    if db_pool is not None:
+        await db_pool.close()
+        db_pool = None
+        db_ready = False
+        print("🛑 DB pool closed")
+
+
+
 # ============================
 #   KORTTIDSMINNE FÖR GPT
 # ============================
@@ -101,7 +240,16 @@ conversation_history: dict[int, list[dict]] = {}
 
 @bot.event
 async def on_ready():
-    global last_status, last_change_time
+    global db_ready, last_status, last_change_time
+
+    if not db_ready:
+        try:
+            await init_db()
+            db_ready = True
+            print("✅ DB connected")
+        except Exception as e:
+            print("❌ DB init failed:", repr(e))
+            return
 
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
 
@@ -125,10 +273,15 @@ async def on_ready():
 
     if is_online_like(current_status):
         last_change_time = now
+        if not await presence_has_open_session(OWNER_ID):
+            await presence_open_session(OWNER_ID, now)
     else:
         last_change_time = None
+        if await presence_has_open_session(OWNER_ID):
+            await presence_close_session(OWNER_ID, now)
 
     print(f"Startstatus: {last_status}, last_change_time: {last_change_time}")
+
 
 
 #   SIX SEVEN RESPONSE
@@ -159,13 +312,20 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
     was_online = is_online_like(last_status)
     is_now_online = is_online_like(after.status)
 
+    # OFFLINE: close open session
     if was_online and not is_now_online:
-        add_interval(last_change_time, now)
+        if await presence_has_open_session(OWNER_ID):
+            await presence_close_session(OWNER_ID, now)
+        last_change_time = None
 
+    # ONLINE: open new session
     if not was_online and is_now_online:
         last_change_time = now
+        if not await presence_has_open_session(OWNER_ID):
+            await presence_open_session(OWNER_ID, now)
 
     last_status = after.status
+
 
 @bot.command(help="Säger hej till dig. Mest för debug")
 async def hello(ctx):
@@ -177,6 +337,9 @@ async def dansa(ctx):
 
 @bot.command(help="Visar exakta onlinetider för hebbe senaste 7 dagarna.")
 async def hebbe(ctx):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
     """Visar exakta onlinetider (start–slut) per dag senaste 7 dagarna."""
     now = datetime.now(TIMEZONE)
     seven_days_ago = now.date() - timedelta(days=6)
@@ -185,10 +348,12 @@ async def hebbe(ctx):
 
     # dag -> lista av (start, slut)
     per_day: dict[datetime.date, list[tuple[datetime, datetime]]] = {}
+    interval_rows = await presence_get_last_7_days(OWNER_ID)
 
-    for entry in presence_intervals:
-        start = datetime.fromisoformat(entry['start']).astimezone(TIMEZONE)
-        end = datetime.fromisoformat(entry['end']).astimezone(TIMEZONE)
+    for start, end in interval_rows:
+        start = start.astimezone(TIMEZONE)
+        end = end.astimezone(TIMEZONE)
+
 
         # hoppa över intervall helt utanför 7-dagarsfönstret
         if end.date() < seven_days_ago or start.date() > now.date():
@@ -300,7 +465,15 @@ async def gpt(ctx, *, prompt: str | None = None):
     try:
         async with ctx.channel.typing():
             print("[Groq] Skickar request...")
-            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+            resp = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=payload,
+                headers=headers,
+                timeout=15
+            )
+
+            
 
         print("[Groq] Statuskod:", resp.status_code)
         print("[Groq] Förhandsvisning av svar:", resp.text[:300])
@@ -394,7 +567,14 @@ async def gg(ctx, *, prompt: str | None = None):
 
     try:
         async with ctx.channel.typing():
-            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+            resp = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=payload,
+                headers=headers,
+                timeout=15
+            )
+
 
         print("[Gemini] Statuskod:", resp.status_code)
         print("[Gemini] Preview:", resp.text[:300])
@@ -437,9 +617,6 @@ async def summary1h(ctx):
         since = now - timedelta(hours=1)
 
         await ctx.reply("(debug) Hämtar meddelanden senaste timmen...")
-
-        messages: list[str] = []
-
 
         messages: list[str] = []
 
@@ -505,7 +682,14 @@ async def summary1h(ctx):
 
         print("[Gemini-summary] Skickar request...")
         async with ctx.channel.typing():
-            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+            resp = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=payload,
+                headers=headers,
+                timeout=20
+            )
+
 
         print("[Gemini-summary] Statuskod:", resp.status_code)
         print("[Gemini-summary] Preview:", resp.text[:300])
@@ -537,35 +721,11 @@ async def summary1h(ctx):
         traceback.print_exc()
         await ctx.send(f"summary1h kraschade:\n`{type(e).__name__}: {e}`")
 
-
-
-#   ECONOMY OCH ROULETTE
-
-COINS_FILE = "coins.json"
+#Till ECON FÖR GAMBA
 DAILY_COINS = 100
-MAX_BET = DAILY_COINS * 10  # 10x daily
-
-economy_lock = asyncio.Lock()
+MAX_BET = DAILY_COINS * 10
 rng = random.SystemRandom()
 
-def load_coins():
-    try:
-        with open(COINS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-def save_coins(data):
-    with open(COINS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-economy = load_coins()
-
-def get_user(econ: dict, user_id: int):
-    uid = str(user_id)
-    if uid not in econ:
-        econ[uid] = {"balance": 0, "last_daily": None}
-    return econ[uid]
 
 # Roulette helpers (European roulette: 0-36, 0 is green)
 RED_NUMS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
@@ -582,69 +742,94 @@ def color_emoji(color: str) -> str:
 
 
 
-#   DAILY FUNC SOM GET 100c
 @bot.command(help="Få 100 coins var 24:e timme.")
 async def daily(ctx):
+    if not db_is_ready():
+        await ctx.reply("Databasen startar fortfarande, testa igen om några sekunder.")
+        return
     now = datetime.now(TIMEZONE)
 
-    async with economy_lock:
-        user = get_user(economy, ctx.author.id)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT balance, last_daily FROM economy WHERE user_id=$1 FOR UPDATE",
+                ctx.author.id
+            )
 
-        if user["last_daily"]:
-            last = datetime.fromisoformat(user["last_daily"]).astimezone(TIMEZONE)
-            if now - last < timedelta(hours=24):
-                remaining = timedelta(hours=24) - (now - last)
-                hours, rem = divmod(int(remaining.total_seconds()), 3600)
-                mins = (rem // 60)
-                await ctx.reply(f"Du har redan claimat daily för fan. Kom tillbaka om **{hours}h {mins}m**.")
-                return
+            if row is None:
+                balance = 0
+                last_daily = None
+                await conn.execute(
+                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
+                    ctx.author.id
+                )
+            else:
+                balance = int(row["balance"])
+                last_daily = row["last_daily"]
 
-        user["balance"] += DAILY_COINS
-        user["last_daily"] = now.isoformat()
-        save_coins(economy)
-        bal = user["balance"]
+            if last_daily is not None:
+                last_local = last_daily.astimezone(TIMEZONE)
+                if now - last_local < timedelta(hours=24):
+                    remaining = timedelta(hours=24) - (now - last_local)
+                    hours, rem = divmod(int(remaining.total_seconds()), 3600)
+                    mins = rem // 60
+                    await ctx.reply(f"Du har redan claimat daily. Kom tillbaka om **{hours}h {mins}m**.")
+                    return
 
-    await ctx.reply(f"✅ {ctx.author.mention} fick **{DAILY_COINS} coins**! Ny balante: **{bal}** 💰")
+            balance += DAILY_COINS
+            await conn.execute(
+                "UPDATE economy SET balance=$1, last_daily=$2 WHERE user_id=$3",
+                balance, now, ctx.author.id
+            )
+
+    await ctx.reply(f"✅ {ctx.author.mention} fick **{DAILY_COINS} coins**! Ny balans: **{balance}** 💰")
+
 
 
 # BALANCE COMMAND
-@bot.command(aliases=["bal"], help="Visar din coin-balans.")
+@bot.command(aliases=["bal"], help="Visar din coin-balante.")
 async def balance(ctx, member: discord.Member | None = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
     member = member or ctx.author
-    async with economy_lock:
-        user = get_user(economy, member.id)
-        bal = user["balance"]
-    await ctx.reply(f"💰 {member.display_name} har **{bal} coins**.")
+    bal, _ = await econ_get(member.id)
+    await ctx.reply(f"💰 {member.display_name} har **{bal} cöins**.")
+
 
 
 # LEADERBOARD COMMAND
 @bot.command(help="Visar top 10 rikaste spelarna i servern.")
 async def leaderboard(ctx):
-    async with economy_lock:
-        # Build list of (member, balance) only for current guild members
-        rows = []
-        for uid, data in economy.items():
-            m = ctx.guild.get_member(int(uid))
-            if m is None:
-                continue
-            rows.append((m, int(data.get("balance", 0))))
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT user_id, balance
+            FROM economy
+            ORDER BY balance DESC
+            LIMIT 10
+        """)
 
     if not rows:
-        await ctx.reply("Ingen har coins än walla Skriv `!daily` för att starta economy.")
+        await ctx.reply("Ingen har coins än. Skriv `!daily` för att starta economy.")
         return
 
-    rows.sort(key=lambda x: x[1], reverse=True)
-    top = rows[:10]
+    lines = []
+    rank = 1
+    for r in rows:
+        member = ctx.guild.get_member(int(r["user_id"]))
+        if member is None:
+            continue
+        lines.append(f"**#{rank}** {member.display_name} — **{int(r['balance'])}** 💰")
+        rank += 1
 
     embed = discord.Embed(title="🏆 Leaderboard (Top 10)", description="Mest cash på servern", color=0xF1C40F)
-    lines = []
-    for i, (m, bal) in enumerate(top, start=1):
-        lines.append(f"**#{i}** {m.display_name} — **{bal}** 💰")
-
-    embed.add_field(name="Ranking", value="\n".join(lines), inline=False)
+    embed.add_field(name="Ranking", value="\n".join(lines) if lines else "—", inline=False)
     embed.set_footer(text=f"Max bet: {MAX_BET} | Daily: {DAILY_COINS}/24h")
-
     await ctx.send(embed=embed)
+
 
 
 
@@ -655,6 +840,9 @@ async def leaderboard(ctx):
 @bot.command(help="Bettar coins på red, black eller green. Ex: !bet 100 red eller !bet all green")
 @commands.cooldown(1, 3, commands.BucketType.user)
 async def bet(ctx, amount: str = None, color: str = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
     if amount is None or color is None:
         await ctx.reply("Ex: `!bet 100 red` | `!bet all black` | `!bet 50 green`")
         return
@@ -664,16 +852,13 @@ async def bet(ctx, amount: str = None, color: str = None):
         await ctx.reply("Du kan bara betta på: `red`, `black`, `green`.")
         return
 
-    # Resolve amount
-    async with economy_lock:
-        user = get_user(economy, ctx.author.id)
-        bal = int(user["balance"])
+    bal, _ = await econ_get(ctx.author.id)
 
     if amount.lower() == "all":
         if bal <= 0:
             await ctx.reply("Du har **0 coins**. Claim `!daily` först kanske")
             return
-        bet_amount = min(bal, MAX_BET)  # all-in but still capped by MAX_BET
+        bet_amount = min(bal, MAX_BET)
         all_in = True
     else:
         try:
@@ -685,21 +870,16 @@ async def bet(ctx, amount: str = None, color: str = None):
         if bet_amount <= 0:
             await ctx.reply("Amount måste vara > 0.")
             return
-
         if bet_amount > MAX_BET:
             await ctx.reply(f"Max bet är **{MAX_BET}** (10x daily).")
             return
-
         all_in = False
 
-    # Check funds + deduct stake upfront
-    async with economy_lock:
-        user = get_user(economy, ctx.author.id)
-        if user["balance"] < bet_amount:
-            await ctx.reply(f"Du har bara **{user['balance']} coins**. Fattig")
-            return
-        user["balance"] -= bet_amount
-        save_coins(economy)
+    # Withdraw stake atomically
+    new_bal_after_withdraw = await econ_try_withdraw(ctx.author.id, bet_amount)
+    if new_bal_after_withdraw is None:
+        await ctx.reply(f"Du har inte tillräckligt med coins brokeboy (balans: **{bal}**).")
+        return
 
     # Spin animation
     spin_msg = await ctx.send(f"🎰 {ctx.author.mention} bettar **{bet_amount}** på {color_emoji(color)} **{color}**...")
@@ -709,13 +889,9 @@ async def bet(ctx, amount: str = None, color: str = None):
         await spin_msg.edit(content=f"🎰 Snurrar... {color_emoji(fake_col)} **{fake_num}**")
         await asyncio.sleep(0.35)
 
-    # Final result
     result_num = rng.randrange(0, 37)
     result_col = roulette_color(result_num)
 
-    # Payouts (profit-based)
-    # red/black: 1:1 profit (win returns 2x total including stake)
-    # green: 14:1 profit (win returns 15x total including stake)
     if color in ("red", "black"):
         win_total_return = bet_amount * 2
         profit = bet_amount
@@ -725,26 +901,23 @@ async def bet(ctx, amount: str = None, color: str = None):
 
     win = (result_col == color)
 
-    async with economy_lock:
-        user = get_user(economy, ctx.author.id)
-        if win:
-            user["balance"] += win_total_return
-        save_coins(economy)
-        new_bal = int(user["balance"])
-
     if win:
-        extra = " (ALL-IN )" if all_in else ""
+        new_bal = await econ_deposit(ctx.author.id, win_total_return)
+        extra = " (ALL-IN)" if all_in else ""
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
             f"✅ {ctx.author.mention} vann{extra}! +**{profit}** profit\n"
             f"💰 Ny balans: **{new_bal}**"
         ))
     else:
+        # balance already reduced
+        bal_now, _ = await econ_get(ctx.author.id)
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
-            f"❌ {ctx.author.mention} förlorade **{bet_amount}** coins rip\n"
-            f"💰 Ny balans: **{new_bal}**"
+            f"❌ {ctx.author.mention} förlorade **{bet_amount}** coins unluko\n"
+            f"💰 Ny balante: **{bal_now}**"
         ))
+
 
 #BET COOLDOWN
 @bet.error
