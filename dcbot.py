@@ -11,6 +11,7 @@ import random
 from typing import Optional
 import asyncpg
 import sys
+import signal
 
 # ============================
 #   LÄS MILJÖVARIABLER
@@ -41,8 +42,15 @@ TIMEZONE = ZoneInfo('Europe/Stockholm')
 db_pool: Optional[asyncpg.Pool] = None
 db_ready = False
 
+def require_db() -> asyncpg.Pool:
+    """Returns pool or raises a clear error if DB isn't ready yet."""
+    if db_pool is None:
+        raise RuntimeError("DB not ready (db_pool is None)")
+    return db_pool
+
+
 def db_is_ready() -> bool:
-    return db_pool is not None
+    return db_ready and db_pool is not None
 
 
 async def init_db():
@@ -53,7 +61,8 @@ async def init_db():
 
     db_pool = await asyncpg.create_pool(dsn=database_url, min_size=1, max_size=5)
 
-    async with db_pool.acquire() as conn:
+    pool = require_db()
+    async with pool.acquire() as conn:
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS economy (
             user_id BIGINT PRIMARY KEY,
@@ -78,142 +87,135 @@ async def init_db():
         );
         """)
 
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_presence_user_end_start
+            ON presence_intervals (user_id, end_ts, start_ts);
+        """)
+
 
 
 # ============================
 #   DB HELPERS: ECONOMY
 # ============================
 async def econ_get(user_id: int) -> tuple[int, Optional[datetime]]:
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
+    pool = require_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO economy(user_id)
+            VALUES($1)
+            ON CONFLICT (user_id) DO NOTHING
+            RETURNING balance, last_daily
+        """, user_id)
+
+        if row is not None:
+            return int(row["balance"]), row["last_daily"]
+
+        row2 = await conn.fetchrow(
             "SELECT balance, last_daily FROM economy WHERE user_id=$1",
             user_id
         )
-        if row is None:
-            await conn.execute(
-                "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
-                user_id
-            )
-            return 0, None
-        return int(row["balance"]), row["last_daily"]
+        return int(row2["balance"]), row2["last_daily"]
+
 
 async def econ_try_withdraw(user_id: int, amount: int) -> Optional[int]:
-    """Atomic: subtract stake if enough balance. Returns new balance or None."""
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT balance FROM economy WHERE user_id=$1 FOR UPDATE",
-                user_id
-            )
-            if row is None:
-                await conn.execute(
-                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
-                    user_id
-                )
-                balance = 0
-            else:
-                balance = int(row["balance"])
+    pool = require_db()
+    async with pool.acquire() as conn:
+        # ensure row exists (no race)
+        await conn.execute("""
+            INSERT INTO economy(user_id)
+            VALUES($1)
+            ON CONFLICT (user_id) DO NOTHING
+        """, user_id)
 
-            if balance < amount:
-                return None
+        row = await conn.fetchrow("""
+            UPDATE economy
+            SET balance = balance - $2
+            WHERE user_id = $1 AND balance >= $2
+            RETURNING balance
+        """, user_id, amount)
 
-            new_balance = balance - amount
-            await conn.execute(
-                "UPDATE economy SET balance=$1 WHERE user_id=$2",
-                new_balance, user_id
-            )
-            return new_balance
+        if row is None:
+            return None
+        return int(row["balance"])
+
+
 
 async def econ_deposit(user_id: int, amount: int) -> int:
-    """Atomic: add amount. Returns new balance."""
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT balance FROM economy WHERE user_id=$1 FOR UPDATE",
-                user_id
-            )
-            if row is None:
-                await conn.execute(
-                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
-                    user_id
-                )
-                balance = 0
-            else:
-                balance = int(row["balance"])
+    pool = require_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO economy(user_id, balance)
+            VALUES($1, $2)
+            ON CONFLICT (user_id) DO UPDATE
+            SET balance = economy.balance + EXCLUDED.balance
+            RETURNING balance
+        """, user_id, amount)
+        return int(row["balance"])
 
-            new_balance = balance + amount
-            await conn.execute(
-                "UPDATE economy SET balance=$1 WHERE user_id=$2",
-                new_balance, user_id
-            )
-            return new_balance
+
 
 async def econ_transfer(sender_id: int, receiver_id: int, amount: int):
-    async with db_pool.acquire() as conn:
+    if amount <= 0:
+        return None
+
+    pool = require_db()
+    async with pool.acquire() as conn:
         async with conn.transaction():
+            # ensure both exist
+            await conn.execute("""
+                INSERT INTO economy(user_id)
+                VALUES($1)
+                ON CONFLICT (user_id) DO NOTHING
+            """, sender_id)
+            await conn.execute("""
+                INSERT INTO economy(user_id)
+                VALUES($1)
+                ON CONFLICT (user_id) DO NOTHING
+            """, receiver_id)
 
-            # 🔒 ALWAYS lock in the same order
+            # Lock in consistent order to avoid deadlocks
             a, b = sorted([sender_id, receiver_id])
-
-            row_a = await conn.fetchrow(
-                "SELECT user_id, balance FROM economy WHERE user_id=$1 FOR UPDATE",
+            await conn.execute(
+                "SELECT 1 FROM economy WHERE user_id=$1 FOR UPDATE",
                 a
             )
-            if row_a is None:
-                await conn.execute(
-                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
-                    a
-                )
-                bal_a = 0
-            else:
-                bal_a = int(row_a["balance"])
-
-            row_b = await conn.fetchrow(
-                "SELECT user_id, balance FROM economy WHERE user_id=$1 FOR UPDATE",
+            await conn.execute(
+                "SELECT 1 FROM economy WHERE user_id=$1 FOR UPDATE",
                 b
             )
-            if row_b is None:
-                await conn.execute(
-                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
-                    b
-                )
-                bal_b = 0
-            else:
-                bal_b = int(row_b["balance"])
 
-            # Map balances back to sender/receiver
-            if sender_id == a:
-                sender_bal, receiver_bal = bal_a, bal_b
-            else:
-                sender_bal, receiver_bal = bal_b, bal_a
+            # withdraw from sender (must have enough)
+            row = await conn.fetchrow("""
+                UPDATE economy
+                SET balance = balance - $2
+                WHERE user_id = $1 AND balance >= $2
+                RETURNING balance
+            """, sender_id, amount)
 
-            if sender_bal < amount:
+            if row is None:
                 return None
 
-            sender_bal -= amount
-            receiver_bal += amount
+            # deposit to receiver
+            row2 = await conn.fetchrow("""
+                UPDATE economy
+                SET balance = balance + $2
+                WHERE user_id = $1
+                RETURNING balance
+            """, receiver_id, amount)
 
-            await conn.execute(
-                "UPDATE economy SET balance=$1 WHERE user_id=$2",
-                sender_bal, sender_id
-            )
-            await conn.execute(
-                "UPDATE economy SET balance=$1 WHERE user_id=$2",
-                receiver_bal, receiver_id
-            )
+            new_sender = int(row["balance"])
+            new_receiver = int(row2["balance"])
+            return new_sender, new_receiver
 
-            return sender_bal, receiver_bal
+
 
 
 
 WELCOME_BONUS = 300
 
 async def econ_claim_welcome(user_id: int, bonus: int = WELCOME_BONUS) -> Optional[int]:
-    """
-    Gives welcome bonus once, only if user has never bet.
-    Returns new balance if success, otherwise None.
-    """
-    async with db_pool.acquire() as conn:
+    pool = require_db()
+    async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 "SELECT balance, has_bet, welcome_claimed FROM economy WHERE user_id=$1 FOR UPDATE",
@@ -247,7 +249,8 @@ async def econ_claim_welcome(user_id: int, bonus: int = WELCOME_BONUS) -> Option
 #   DB HELPERS: PRESENCE
 # ============================
 async def presence_get_last_7_days(user_id: int) -> list[tuple[datetime, datetime]]:
-    async with db_pool.acquire() as conn:
+    pool = require_db()
+    async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT start_ts, end_ts
             FROM presence_intervals
@@ -260,6 +263,17 @@ async def presence_get_last_7_days(user_id: int) -> list[tuple[datetime, datetim
     return [(r["start_ts"], r["end_ts"]) for r in rows]
 
 
+
+async def presence_close_all_open_sessions(user_id: int, end_dt: datetime):
+    if db_pool is None:
+        return  # silent best-effort
+    pool = require_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE presence_intervals
+            SET end_ts = $2
+            WHERE user_id = $1 AND end_ts IS NULL
+        """, user_id, end_dt)
 
 
 
@@ -279,15 +293,17 @@ def is_online_like(status: discord.Status) -> bool:
 
 
 async def presence_open_session(user_id: int, start_dt: datetime):
-    async with db_pool.acquire() as conn:
+    pool = require_db()
+    async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO presence_intervals(user_id, start_ts, end_ts)
             VALUES($1, $2, NULL)
         """, user_id, start_dt)
 
+
 async def presence_close_session(user_id: int, end_dt: datetime):
-    async with db_pool.acquire() as conn:
-        # Close the most recent open session
+    pool = require_db()
+    async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE presence_intervals
             SET end_ts = $2
@@ -300,8 +316,10 @@ async def presence_close_session(user_id: int, end_dt: datetime):
             )
         """, user_id, end_dt)
 
+
 async def presence_has_open_session(user_id: int) -> bool:
-    async with db_pool.acquire() as conn:
+    pool = require_db()
+    async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT 1
             FROM presence_intervals
@@ -309,6 +327,7 @@ async def presence_has_open_session(user_id: int) -> bool:
             LIMIT 1
         """, user_id)
     return row is not None
+
 
 
 # ============================
@@ -321,15 +340,50 @@ intents.presences = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-
-@bot.event
-async def on_disconnect():
+async def shutdown():
     global db_pool, db_ready
+    print("🛑 Shutdown started...")
+
+    try:
+        now = datetime.now(TIMEZONE)
+        await presence_close_all_open_sessions(OWNER_ID, now)
+        print("✅ Closed open presence sessions (if any)")
+    except Exception as e:
+        print("⚠️ Failed to close presence sessions:", repr(e))
+
     if db_pool is not None:
         await db_pool.close()
         db_pool = None
         db_ready = False
         print("🛑 DB pool closed")
+
+    try:
+        await bot.close()
+    except Exception:
+        pass
+
+
+
+@bot.event
+async def setup_hook():
+    try:
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(_shutdown_from_loop()))
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(_shutdown_from_loop()))
+        print("✅ Signal handlers registered")
+    except (NotImplementedError, AttributeError):
+        print("⚠️ Signal handlers not supported on this platform.")
+
+
+
+async def _shutdown_from_loop():
+    await shutdown()
+
+
+@bot.event
+async def on_disconnect():
+    print("⚠️ Discord disconnected (will try to reconnect)")
+
 
 
 
@@ -841,6 +895,29 @@ def roulette_color(n: int) -> str:
 def color_emoji(color: str) -> str:
     return {"red": "🔴", "black": "⚫", "green": "🟢"}[color]
 
+# European wheel order (single-zero)
+WHEEL = [
+    0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5,
+    24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26
+]
+
+def tile(n: int) -> str:
+    col = roulette_color(n)
+    # compact fixed-width tile for nice alignment in code blocks
+    return f"{color_emoji(col)}{n:>2}"
+
+def render_strip(start_idx: int, width: int = 10) -> str:
+    parts = []
+    for i in range(width):
+        n = WHEEL[(start_idx + i) % len(WHEEL)]
+        parts.append(tile(n))
+
+    # pointer in the middle
+    pointer_pos = width // 2
+    parts[pointer_pos] = f"⬇️{parts[pointer_pos]}⬇️"
+    return " | ".join(parts)
+
+
 
 
 
@@ -849,25 +926,28 @@ async def daily(ctx):
     if not db_is_ready():
         await ctx.reply("Databasen startar fortfarande, testa igen om några sekunder.")
         return
+
     now = datetime.now(TIMEZONE)
+    pool = require_db()
 
-    async with db_pool.acquire() as conn:
+    async with pool.acquire() as conn:
         async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT balance, last_daily FROM economy WHERE user_id=$1 FOR UPDATE",
-                ctx.author.id
-            )
+            # ensure row exists
+            await conn.execute("""
+                INSERT INTO economy(user_id)
+                VALUES($1)
+                ON CONFLICT (user_id) DO NOTHING
+            """, ctx.author.id)
 
-            if row is None:
-                balance = 0
-                last_daily = None
-                await conn.execute(
-                    "INSERT INTO economy(user_id, balance, last_daily) VALUES($1, 0, NULL)",
-                    ctx.author.id
-                )
-            else:
-                balance = int(row["balance"])
-                last_daily = row["last_daily"]
+            row = await conn.fetchrow("""
+                SELECT balance, last_daily
+                FROM economy
+                WHERE user_id=$1
+                FOR UPDATE
+            """, ctx.author.id)
+
+            balance = int(row["balance"])
+            last_daily = row["last_daily"]
 
             if last_daily is not None:
                 last_local = last_daily.astimezone(TIMEZONE)
@@ -878,13 +958,17 @@ async def daily(ctx):
                     await ctx.reply(f"Du har redan claimat daily. Kom tillbaka om **{hours}h {mins}m**.")
                     return
 
-            balance += DAILY_COINS
             await conn.execute(
-                "UPDATE economy SET balance=$1, last_daily=$2 WHERE user_id=$3",
-                balance, now, ctx.author.id
+                "UPDATE economy SET balance = balance + $1, last_daily = $2 WHERE user_id = $3",
+                DAILY_COINS, now, ctx.author.id
             )
 
+            # fetch new balance (optional but nice)
+            row2 = await conn.fetchrow("SELECT balance FROM economy WHERE user_id=$1", ctx.author.id)
+            balance = int(row2["balance"])
+
     await ctx.reply(f"✅ {ctx.author.mention} fick **{DAILY_COINS} coins**! Ny balans: **{balance}** 💰")
+
 
 
 
@@ -906,7 +990,9 @@ async def leaderboard(ctx):
     if not db_is_ready():
         await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
         return
-    async with db_pool.acquire() as conn:
+
+    pool = require_db()
+    async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT user_id, balance
             FROM economy
@@ -931,7 +1017,6 @@ async def leaderboard(ctx):
     embed.add_field(name="Ranking", value="\n".join(lines) if lines else "—", inline=False)
     embed.set_footer(text=f"Max bet: {MAX_BET} | Daily: {DAILY_COINS}/24h")
     await ctx.send(embed=embed)
-
 
 
 
@@ -982,32 +1067,75 @@ async def bet(ctx, amount: str = None, color: str = None):
     if new_bal_after_withdraw is None:
         await ctx.reply(f"Du har inte tillräckligt med coins brokeboy (balans: **{bal}**).")
         return
+
     # Mark that user has placed a bet (ever)
-    async with db_pool.acquire() as conn:
+    pool = require_db()
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE economy SET has_bet=TRUE WHERE user_id=$1",
             ctx.author.id
         )
 
-    # Spin animation
-    spin_msg = await ctx.send(f"🎰 {ctx.author.mention} bettar **{bet_amount}** på {color_emoji(color)} **{color}**...")
-    for _ in range(6):
-        fake_num = rng.randrange(0, 37)
-        fake_col = roulette_color(fake_num)
-        await spin_msg.edit(content=f"🎰 Snurrar... {color_emoji(fake_col)} **{fake_num}**")
-        await asyncio.sleep(0.35)
-
+    # -----------------------------
+    # Spin animation (wheel strip)
+    # -----------------------------
     result_num = rng.randrange(0, 37)
     result_col = roulette_color(result_num)
+    target_idx = WHEEL.index(result_num)
 
+    spin_msg = await ctx.send(
+        f"🎰 {ctx.author.mention} bettar **{bet_amount}** på {color_emoji(color)} **{color}**...\n"
+        f"```text\n{render_strip(0)}\n```"
+    )
+
+    async def safe_edit(content: str) -> bool:
+        try:
+            await spin_msg.edit(content=content)
+            return True
+        except discord.NotFound:
+            return False
+
+    idx = rng.randrange(0, len(WHEEL))
+
+    # Phase 1: fast random spin
+    for _ in range(10):
+        idx = (idx + rng.randrange(2, 6)) % len(WHEEL)
+        ok = await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+        if not ok:
+            return
+        await asyncio.sleep(0.10)
+
+    # Phase 2: jump toward target in bigger steps
+    dist = (target_idx - idx) % len(WHEEL)
+    while dist > 8:
+        step = min(4, dist - 8)
+        idx = (idx + step) % len(WHEEL)
+        dist = (target_idx - idx) % len(WHEEL)
+
+        ok = await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+        if not ok:
+            return
+        await asyncio.sleep(0.14)
+
+    # Phase 3: slow final steps to land exactly on target
+    while idx != target_idx:
+        idx = (idx + 1) % len(WHEEL)
+        ok = await safe_edit(f"🎰 Snurrar...\n```text\n{render_strip(idx)}\n```")
+        if not ok:
+            return
+        await asyncio.sleep(0.20)
+
+    final_strip = f"```text\n{render_strip(target_idx)}\n```"
+
+    # -----------------------------
+    # Resolve bet + payout
+    # -----------------------------
     win = (result_col == color)
 
     if color in ("red", "black"):
-        # Even-money bet (1:1)
         win_total_return = bet_amount * 2
         profit = bet_amount
     else:
-        # Betting on 0 like real roulette (35:1)
         win_total_return = bet_amount * 36
         profit = bet_amount * 35
 
@@ -1016,6 +1144,7 @@ async def bet(ctx, amount: str = None, color: str = None):
         extra = " (ALL-IN)" if all_in else ""
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
+            f"{final_strip}\n"
             f"✅ {ctx.author.mention} vann{extra}! +**{profit}** profit\n"
             f"💰 Ny balans: **{new_bal}**"
         ))
@@ -1023,6 +1152,7 @@ async def bet(ctx, amount: str = None, color: str = None):
         bal_now, _ = await econ_get(ctx.author.id)
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
+            f"{final_strip}\n"
             f"❌ {ctx.author.mention} förlorade **{bet_amount}** coins unluko\n"
             f"💰 Ny balante: **{bal_now}**"
         ))
@@ -1096,6 +1226,7 @@ async def send(ctx, amount: str = None, *, member: discord.Member = None):
             await ctx.reply("Amount måste vara > 0.")
             return
 
+
     # Do atomic transfer
     result = await econ_transfer(ctx.author.id, member.id, send_amount)
     if result is None:
@@ -1167,5 +1298,6 @@ async def welcomebonus(ctx):
 # ============================
 #   STARTA BOTTEN
 # ============================
+
 bot.run(token, log_handler=handler, log_level=logging.INFO)
 
