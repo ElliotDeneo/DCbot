@@ -10,7 +10,6 @@ import asyncio
 import random
 from typing import Optional
 import asyncpg
-import sys
 import signal
 
 # ============================
@@ -217,32 +216,39 @@ async def econ_claim_welcome(user_id: int, bonus: int = WELCOME_BONUS) -> Option
     pool = require_db()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT balance, has_bet, welcome_claimed FROM economy WHERE user_id=$1 FOR UPDATE",
-                user_id
-            )
+            # 1) Ensure row exists
+            await conn.execute("""
+                INSERT INTO economy(user_id)
+                VALUES($1)
+                ON CONFLICT (user_id) DO NOTHING
+            """, user_id)
 
+            # 2) Lock row + read flags
+            row = await conn.fetchrow("""
+                SELECT balance, has_bet, welcome_claimed
+                FROM economy
+                WHERE user_id=$1
+                FOR UPDATE
+            """, user_id)
+
+            # (Row should always exist now, but safety anyway)
             if row is None:
-                await conn.execute(
-                    "INSERT INTO economy(user_id, balance, last_daily, has_bet, welcome_claimed) "
-                    "VALUES($1, 0, NULL, FALSE, FALSE)",
-                    user_id
-                )
-                balance, has_bet, welcome_claimed = 0, False, False
-            else:
-                balance = int(row["balance"])
-                has_bet = bool(row["has_bet"])
-                welcome_claimed = bool(row["welcome_claimed"])
-
-            if has_bet or welcome_claimed:
                 return None
 
-            new_balance = balance + bonus
-            await conn.execute(
-                "UPDATE economy SET balance=$1, welcome_claimed=TRUE WHERE user_id=$2",
-                new_balance, user_id
-            )
-            return new_balance
+            if bool(row["has_bet"]) or bool(row["welcome_claimed"]):
+                return None
+
+            # 3) Apply bonus + mark claimed, return new balance
+            updated = await conn.fetchrow("""
+                UPDATE economy
+                SET balance = balance + $2,
+                    welcome_claimed = TRUE
+                WHERE user_id = $1
+                RETURNING balance
+            """, user_id, bonus)
+
+            return int(updated["balance"]) if updated else None
+
 
 
 # ============================
