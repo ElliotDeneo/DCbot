@@ -1436,11 +1436,29 @@ async def stats(ctx, arg: str = None):
         def fmt_row(r, label: str):
             if not r:
                 return f"{label}: —"
+        
             user_id = int(r["user_id"])
-            return (
-                f"{label}: <@{user_id}> | {r['game']} | stake {int(r['stake'])} | "
-                f"profit {int(r['profit'])} | {r['result_text']} | {r['created_at']:%Y-%m-%d %H:%M}"
-            )
+            member = ctx.guild.get_member(user_id)
+            name = member.display_name if member else f"User {user_id}"
+        
+            game = r["game"]
+            stake = int(r["stake"])
+            profit = int(r["profit"])
+            created = r["created_at"].astimezone(TIMEZONE).strftime("%Y-%m-%d %H:%M")
+        
+            # Profit/loss text
+            profit_txt = f"profit {profit}" if profit >= 0 else f"loss {abs(profit)}"
+        
+            # Prettify result_text (supports your old roulette format "num/landedColor/betColor")
+            res = (r["result_text"] or "")
+            if game == "roulette" and "/" in res:
+                parts = res.split("/")
+                if len(parts) >= 3:
+                    num, landed_col, bet_col = parts[0], parts[1], parts[2]
+                    res = f"landed={num}({landed_col}) bet={bet_col}"
+        
+            return f"{label}: {name} | {game} | stake {stake} | {profit_txt} | {res} | {created}"
+
 
         msg = "**📊 Global stats (ALL):**\n" + "```text\n" + fmt_row(win_row, "BIGGEST WIN") + "\n" + fmt_row(loss_row, "BIGGEST LOSS") + "\n```"
         await ctx.reply(msg)
