@@ -10,6 +10,7 @@ import requests
 import asyncio
 import random
 from typing import Optional
+import asyncpg
 
 # ============================
 #   LÄS MILJÖVARIABLER
