@@ -90,6 +90,24 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_presence_user_end_start
             ON presence_intervals (user_id, end_ts, start_ts);
         """)
+        
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bets (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            game TEXT NOT NULL,                 -- "roulette", "coinflip", "blackjack"
+            stake BIGINT NOT NULL,              -- how much user bet
+            payout BIGINT NOT NULL,             -- how much returned to user (0 if loss)
+            profit BIGINT NOT NULL,             -- payout - stake
+            result_text TEXT,                   -- optional text (e.g. "heads", "dealer_bust")
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """)
+
+        await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_bets_user_time
+        ON bets (user_id, created_at DESC);
+        """)
 
 
 
@@ -334,6 +352,61 @@ async def presence_has_open_session(user_id: int) -> bool:
         """, user_id)
     return row is not None
 
+async def log_bet(user_id: int, game: str, stake: int, payout: int, profit: int, result_text: str = ""):
+    pool = require_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bets(user_id, game, stake, payout, profit, result_text)
+            VALUES($1, $2, $3, $4, $5, $6)
+        """, user_id, game, stake, payout, profit, result_text)
+
+
+async def stats_for_user(user_id: int):
+    pool = require_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                COALESCE(SUM(CASE WHEN profit < 0 THEN 1 ELSE 0 END), 0) AS losses,
+                COALESCE(MAX(profit), 0) AS biggest_win,
+                COALESCE(MIN(profit), 0) AS biggest_loss,
+                COALESCE(SUM(profit), 0) AS net_profit
+            FROM bets
+            WHERE user_id=$1
+        """, user_id)
+    return row
+
+
+async def global_biggest_win_loss():
+    pool = require_db()
+    async with pool.acquire() as conn:
+        biggest_win = await conn.fetchrow("""
+            SELECT user_id, game, stake, payout, profit, result_text, created_at
+            FROM bets
+            ORDER BY profit DESC
+            LIMIT 1
+        """)
+        biggest_loss = await conn.fetchrow("""
+            SELECT user_id, game, stake, payout, profit, result_text, created_at
+            FROM bets
+            ORDER BY profit ASC
+            LIMIT 1
+        """)
+    return biggest_win, biggest_loss
+
+
+async def last_bets_for_user(user_id: int, limit: int = 10):
+    pool = require_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT game, stake, profit, result_text, created_at
+            FROM bets
+            WHERE user_id=$1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, user_id, limit)
+    return rows
 
 
 # ============================
@@ -344,7 +417,14 @@ intents.message_content = True
 intents.members = True
 intents.presences = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+class MyBot(commands.Bot):
+    async def close(self):
+        # run your cleanup once, then let discord.py close
+        await shutdown()
+        await super().close()
+
+bot = MyBot(command_prefix='!', intents=intents)
+
 
 async def shutdown():
     global db_pool, db_ready
@@ -363,10 +443,6 @@ async def shutdown():
         db_ready = False
         print("🛑 DB pool closed")
 
-    try:
-        await bot.close()
-    except Exception:
-        pass
 
 
 
@@ -383,7 +459,8 @@ async def setup_hook():
 
 
 async def _shutdown_from_loop():
-    await shutdown()
+    await bot.close()
+
 
 
 @bot.event
@@ -927,6 +1004,40 @@ def render_strip(start_idx: int, width: int = 10) -> str:
 
 
 
+
+BJ_ACTIVE: set[tuple[int, int]] = set()  # (channel_id, user_id)
+
+def bj_value(cards: list[str]) -> int:
+    # cards are like "A♠", "10♥", "K♦"
+    ranks = [c[:-1] for c in cards]
+    total = 0
+    aces = 0
+    for r in ranks:
+        if r in ("J","Q","K"):
+            total += 10
+        elif r == "A":
+            aces += 1
+            total += 11
+        else:
+            total += int(r)
+    while total > 21 and aces > 0:
+        total -= 10
+        aces -= 1
+    return total
+
+def draw_card(deck: list[str]) -> str:
+    return deck.pop()
+
+def new_deck() -> list[str]:
+    suits = ["♠","♥","♦","♣"]
+    ranks = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"]
+    deck = [r+s for s in suits for r in ranks]
+    rng.shuffle(deck)
+    return deck
+
+
+
+
 @bot.command(help="Få 100 coins var 24:e timme.")
 async def daily(ctx):
     if not db_is_ready():
@@ -1152,6 +1263,7 @@ async def bet(ctx, amount: str = None, color: str = None):
 
     if win:
         new_bal = await econ_deposit(ctx.author.id, win_total_return)
+        await log_bet(ctx.author.id, "roulette", bet_amount, win_total_return, profit, f"{result_num}/{result_col}/{color}")
         extra = " (ALL-IN)" if all_in else ""
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
@@ -1161,6 +1273,7 @@ async def bet(ctx, amount: str = None, color: str = None):
         ))
     else:
         bal_now, _ = await econ_get(ctx.author.id)
+        await log_bet(ctx.author.id, "roulette", bet_amount, 0, -bet_amount, f"{result_num}/{result_col}/{color}")
         await spin_msg.edit(content=(
             f"🎯 RESULTAT: {color_emoji(result_col)} **{result_num}**\n"
             f"{final_strip}\n"
@@ -1305,6 +1418,326 @@ async def welcomebonus(ctx):
         return
 
     await ctx.reply(f"🎁 {ctx.author.mention} fick **300 coins** i welcome bonus! Ny balans: **{new_bal}** 💰")
+
+
+@bot.command(help="Stats. !stats | !stats @user | !stats all")
+async def stats(ctx, arg: str = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+
+    # !stats all  -> global biggest win/loss
+    if arg and arg.lower() == "all":
+        win_row, loss_row = await global_biggest_win_loss()
+        if not win_row and not loss_row:
+            await ctx.reply("Inga bets loggade än.")
+            return
+
+        def fmt_row(r, label: str):
+            if not r:
+                return f"{label}: —"
+            user_id = int(r["user_id"])
+            return (
+                f"{label}: <@{user_id}> | {r['game']} | stake {int(r['stake'])} | "
+                f"profit {int(r['profit'])} | {r['result_text']} | {r['created_at']:%Y-%m-%d %H:%M}"
+            )
+
+        msg = "**📊 Global stats (ALL):**\n" + "```text\n" + fmt_row(win_row, "BIGGEST WIN") + "\n" + fmt_row(loss_row, "BIGGEST LOSS") + "\n```"
+        await ctx.reply(msg)
+        return
+
+    # !stats @user (or default: self)
+    member = None
+    if ctx.message.mentions:
+        member = ctx.message.mentions[0]
+    else:
+        member = ctx.author
+
+    row = await stats_for_user(member.id)
+    if not row or int(row["total"]) == 0:
+        await ctx.reply(f"Inga bets loggade för **{member.display_name}** än.")
+        return
+
+    total = int(row["total"])
+    wins = int(row["wins"])
+    losses = int(row["losses"])
+    biggest_win = int(row["biggest_win"])
+    biggest_loss = int(row["biggest_loss"])
+    net_profit = int(row["net_profit"])
+
+    await ctx.reply(
+        f"**📊 Stats för {member.mention}:**\n"
+        f"✅ Wins: **{wins}** | ❌ Losses: **{losses}** | 🎲 Total: **{total}**\n"
+        f"🏆 Biggest win: **{biggest_win}** | 💀 Biggest loss: **{biggest_loss}**\n"
+        f"📈 Net profit: **{net_profit}**"
+    )
+
+
+@bot.command(help="Senaste bets. !bets | !bets @user (admin only)")
+async def bets(ctx, member: discord.Member | None = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+
+    member = member or ctx.author
+
+    # Only admins can view others
+    if member.id != ctx.author.id and ctx.author.id not in ADMIN_IDS:
+        await ctx.reply("❌ Bara admins kan kolla andra personers bet-history.")
+        return
+
+    rows = await last_bets_for_user(member.id, limit=10)
+    if not rows:
+        await ctx.reply(f"Inga bets loggade för **{member.display_name}** än.")
+        return
+
+    lines = []
+    for r in rows:
+        game = r["game"]
+        stake = int(r["stake"])
+        profit = int(r["profit"])
+        when = r["created_at"].astimezone(TIMEZONE).strftime("%m-%d %H:%M")
+        res = (r["result_text"] or "")[:24]
+        sign = "+" if profit > 0 else ""
+        lines.append(f"{when} | {game:<9} | stake {stake:<5} | profit {sign}{profit:<6} | {res}")
+
+    await ctx.reply(f"**🧾 Last 10 bets — {member.display_name}:**\n```text\n" + "\n".join(lines) + "\n```")
+
+
+@bot.command(help="Coinflip. Ex: !coinflip 100 heads | !coinflip all tails")
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def coinflip(ctx, amount: str = None, side: str = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+
+    if amount is None or side is None:
+        await ctx.reply("Ex: `!coinflip 100 heads` | `!coinflip all tails`")
+        return
+
+    side = side.lower().strip()
+    if side in ("h", "head"):
+        side = "heads"
+    if side in ("t", "tail"):
+        side = "tails"
+
+    if side not in ("heads", "tails"):
+        await ctx.reply("Du måste välja `heads` eller `tails`.")
+        return
+
+    bal, _ = await econ_get(ctx.author.id)
+
+    if amount.lower() == "all":
+        if bal <= 0:
+            await ctx.reply("Du har 0 coins. Claim `!daily` eller tigg av någon.")
+            return
+        bet_amount = min(bal, MAX_BET)
+    else:
+        try:
+            bet_amount = int(amount)
+        except ValueError:
+            await ctx.reply("Amount måste vara ett tal eller `all`.")
+            return
+        if bet_amount <= 0:
+            await ctx.reply("Amount måste vara > 0.")
+            return
+        if bet_amount > MAX_BET:
+            await ctx.reply(f"Max bet är **{MAX_BET}**.")
+            return
+
+    # take stake
+    new_bal_after_withdraw = await econ_try_withdraw(ctx.author.id, bet_amount)
+    if new_bal_after_withdraw is None:
+        await ctx.reply(f"Du har inte tillräckligt (balans: **{bal}**).")
+        return
+
+    flip = rng.choice(["heads", "tails"])
+    win = (flip == side)
+
+    if win:
+        payout = bet_amount * 2
+        profit = bet_amount
+        new_bal = await econ_deposit(ctx.author.id, payout)
+        await log_bet(ctx.author.id, "coinflip", bet_amount, payout, profit, flip)
+        await ctx.reply(f"🪙 Det blev **{flip}**! ✅ Du vann **+{profit}** | Ny balans: **{new_bal}**")
+    else:
+        await log_bet(ctx.author.id, "coinflip", bet_amount, 0, -bet_amount, flip)
+        bal_now, _ = await econ_get(ctx.author.id)
+        await ctx.reply(f"🪙 Det blev **{flip}**… ❌ Du förlorade **-{bet_amount}** | Ny balans: **{bal_now}**")
+
+
+@coinflip.error
+async def coinflip_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.reply(f"Chilla, vänta **{error.retry_after:.1f}s**.")
+    else:
+        raise error
+
+
+
+@bot.command(help="Blackjack. Ex: !blackjack 100 | !blackjack all")
+async def blackjack(ctx, amount: str = None):
+    if not db_is_ready():
+        await ctx.reply("⏳ Databasen startar fortfarande, testa igen om några sekunder.")
+        return
+
+    if amount is None:
+        await ctx.reply("Ex: `!blackjack 100` | `!blackjack all`")
+        return
+
+    key = (ctx.channel.id, ctx.author.id)
+    if key in BJ_ACTIVE:
+        await ctx.reply("Du har redan en blackjack igång här. Skriv `bj hit` eller `bj stand` reet")
+        return
+    BJ_ACTIVE.add(key)
+
+    try:
+        bal, _ = await econ_get(ctx.author.id)
+
+        if amount.lower() == "all":
+            if bal <= 0:
+                await ctx.reply("Du har 0 coins. Claim `!daily` eller be någon snäll själ.")
+                return
+            bet_amount = min(bal, MAX_BET)
+        else:
+            try:
+                bet_amount = int(amount)
+            except ValueError:
+                await ctx.reply("Amount måste vara ett tal eller `all`.")
+                return
+            if bet_amount <= 0:
+                await ctx.reply("Amount måste vara > 0.")
+                return
+            if bet_amount > MAX_BET:
+                await ctx.reply(f"Max bet är **{MAX_BET}**.")
+                return
+
+        # take stake
+        new_bal_after_withdraw = await econ_try_withdraw(ctx.author.id, bet_amount)
+        if new_bal_after_withdraw is None:
+            await ctx.reply(f"Du har inte tillräckligt (balans: **{bal}**).")
+            return
+
+        deck = new_deck()
+        player = [draw_card(deck), draw_card(deck)]
+        dealer = [draw_card(deck), draw_card(deck)]
+
+        def status_text(hide_dealer: bool = True):
+            pv = bj_value(player)
+            if hide_dealer:
+                return (
+                    f"🃏 **Blackjack** (bet {bet_amount})\n"
+                    f"Du: {', '.join(player)}  (**{pv}**)\n"
+                    f"Dealer: {dealer[0]}, ??\n"
+                    f"Skriv `bj hit` eller `bj stand` (30s)"
+                )
+            dv = bj_value(dealer)
+            return (
+                f"🃏 **Blackjack** (bet {bet_amount})\n"
+                f"Du: {', '.join(player)}  (**{pv}**)\n"
+                f"Dealer: {', '.join(dealer)}  (**{dv}**)"
+            )
+
+        msg = await ctx.send(status_text(hide_dealer=True))
+
+        # Player turn
+        while True:
+            pv = bj_value(player)
+
+            # natural blackjack (A + 10)
+            if pv == 21 and len(player) == 2:
+                break
+
+            if pv > 21:
+                break
+
+            def check(m: discord.Message):
+                return (
+                    m.author.id == ctx.author.id
+                    and m.channel.id == ctx.channel.id
+                    and m.content.lower().strip() in ("bj hit", "bj stand")
+                    )
+
+            try:
+                reply = await bot.wait_for("message", timeout=30, check=check)
+            except asyncio.TimeoutError:
+                # timeout = auto stand
+                break
+
+            choice = reply.content.lower().strip()
+            if choice == "bj hit":
+                player.append(draw_card(deck))
+                await msg.edit(content=status_text(hide_dealer=True))
+                continue
+            else:
+                break
+
+        pv = bj_value(player)
+
+        # Dealer turn (reveal)
+        if pv <= 21:
+            while bj_value(dealer) < 17:
+                dealer.append(draw_card(deck))
+
+        dv = bj_value(dealer)
+
+        # Resolve
+        result = ""
+        payout = 0
+        profit = -bet_amount
+
+        # natural blackjack payout 3:2
+        if pv == 21 and len(player) == 2 and dv != 21:
+            payout = int(bet_amount * 2.5)  # returns stake + 1.5x profit
+            profit = payout - bet_amount
+            result = "player_blackjack"
+        elif pv > 21:
+            payout = 0
+            profit = -bet_amount
+            result = "player_bust"
+        elif dv > 21:
+            payout = bet_amount * 2
+            profit = bet_amount
+            result = "dealer_bust"
+        elif dv == 21 and len(dealer) == 2 and not (pv == 21 and len(player) == 2):
+            payout = 0
+            profit = -bet_amount
+            result = "dealer_blackjack"
+        else:
+            if pv > dv:
+                payout = bet_amount * 2
+                profit = bet_amount
+                result = "win"
+            elif pv < dv:
+                payout = 0
+                profit = -bet_amount
+                result = "loss"
+            else:
+                # push: give stake back
+                payout = bet_amount
+                profit = 0
+                result = "push"
+
+        if payout > 0:
+            new_bal = await econ_deposit(ctx.author.id, payout)
+        else:
+            new_bal, _ = await econ_get(ctx.author.id)
+
+        await log_bet(ctx.author.id, "blackjack", bet_amount, payout, profit, result)
+
+        end_text = status_text(hide_dealer=False)
+        if profit > 0:
+            end_text += f"\n✅ Du vann **+{profit}** | Ny balans: **{new_bal}**"
+        elif profit < 0:
+            end_text += f"\n❌ Du förlorade **{bet_amount}** | Ny balans: **{new_bal}**"
+        else:
+            end_text += f"\n🤝 Push (pengarna tillbaka...spring tillbaka) | Ny balans: **{new_bal}**"
+
+        await msg.edit(content=end_text)
+
+    finally:
+        BJ_ACTIVE.discard((ctx.channel.id, ctx.author.id))
+
 
 
 # ============================
