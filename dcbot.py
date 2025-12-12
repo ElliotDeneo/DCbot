@@ -12,7 +12,7 @@ from typing import Optional
 import asyncpg
 import sys
 
-discord.utils.setup_logging(level=logging.INFO, stream=sys.stdout)
+discord.utils.setup_logging(level=logging.INFO)
 
 # ============================
 #   LÄS MILJÖVARIABLER
