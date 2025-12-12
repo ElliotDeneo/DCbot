@@ -10,7 +10,9 @@ import asyncio
 import random
 from typing import Optional
 import asyncpg
+import sys
 
+discord.utils.setup_logging(level=logging.INFO, stream=sys.stdout)
 
 # ============================
 #   LÄS MILJÖVARIABLER
