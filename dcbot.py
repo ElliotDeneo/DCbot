@@ -962,7 +962,7 @@ async def summary1h(ctx):
 
 #Till ECON FÖR GAMBA
 DAILY_COINS = 100
-MAX_BET = DAILY_COINS * 10
+MAX_BET = DAILY_COINS * 25
 rng = random.SystemRandom()
 
 
